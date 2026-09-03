@@ -1,52 +1,52 @@
 """
-Pulls quarterly fundamentals from SEC EDGAR's company facts API and
-lands them as Parquet.
+Pulls quarterly fundamentals from SEC EDGAR and lands them as Parquet in S3.
 
 Three real problems this handles:
 
-1. TAG INCONSISTENCY. Companies report the same concept under
-   different US-GAAP tags depending on filer and year. Revenue might
-   be Revenues, RevenueFromContractWithCustomerExcludingAssessedTax,
-   or SalesRevenueNet. We define a priority list per metric and take
-   the first tag present for each company.
+1. TAG INCONSISTENCY. Companies report the same concept under different
+   US-GAAP tags. Revenue might be Revenues,
+   RevenueFromContractWithCustomerExcludingAssessedTax, or SalesRevenueNet.
+   A priority list per metric resolves it; first tag present wins.
 
-2. RESTATEMENTS. The same fiscal period appears multiple times: once
-   from the original 10-Q, again from later filings that restate it.
-   Each entry carries a `filed` date, so we keep the most recently
-   filed value per (metric, period).
+2. RESTATEMENTS. The same fiscal period appears repeatedly as later
+   filings restate it. Each entry has a `filed` date, so we keep the
+   most recently filed value per period.
 
-3. RATE LIMITING. SEC allows ~10 req/sec and blocks abusers. We make
-   one call per company, sequentially, with a deliberate delay.
+3. RATE LIMITING. SEC allows ~10 req/sec. One sequential call per
+   company with a deliberate delay stays well under.
+
+Fundamentals update quarterly, so unlike prices this writes a single
+snapshot object rather than date partitions.
 
 Usage:
     python scripts/ingest_fundamentals.py
-    python scripts/ingest_fundamentals.py --limit 5    # smoke test
+    python scripts/ingest_fundamentals.py --limit 5
 """
 
 import argparse
 import json
+import os
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import requests
 
+sys.path.insert(0, str(Path(__file__).parent))
+from s3_utils import get_bucket, load_env, write_parquet_to_s3
+
 PROJECT_ROOT = Path(__file__).parent.parent
 TICKER_MAP_PATH = PROJECT_ROOT / "data" / "ticker_cik_map.json"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "fundamentals"
 
+S3_PREFIX = "raw/fundamentals"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
-# REQUIRED: replace with your real name and email, same as the
-# ticker script. SEC blocks requests that don't identify the caller.
-USER_AGENT = "Pranav pranteja.com>"
-
-REQUEST_DELAY = 0.15     # ~6.7 req/sec, comfortably under SEC's 10/sec
+REQUEST_DELAY = 0.15     # ~6.7 req/sec, under SEC's 10/sec limit
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 3
 
-# Ordered by preference. First tag found for a company wins.
 METRIC_TAGS = {
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -60,15 +60,9 @@ METRIC_TAGS = {
         "ProfitLoss",
         "NetIncomeLossAvailableToCommonStockholdersBasic",
     ],
-    "operating_income": [
-        "OperatingIncomeLoss",
-    ],
-    "total_assets": [
-        "Assets",
-    ],
-    "total_liabilities": [
-        "Liabilities",
-    ],
+    "operating_income": ["OperatingIncomeLoss"],
+    "total_assets": ["Assets"],
+    "total_liabilities": ["Liabilities"],
     "stockholders_equity": [
         "StockholdersEquity",
         "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
@@ -89,6 +83,24 @@ METRIC_TAGS = {
 }
 
 
+def get_user_agent() -> str:
+    """SEC blocks requests that don't identify the caller by name and email.
+
+    Read from .env rather than hardcoded so a personal address doesn't
+    end up in a public repo.
+    """
+    load_env()
+    ua = os.environ.get("SEC_USER_AGENT")
+    if not ua or "example.com" in ua:
+        raise SystemExit(
+            "ERROR: SEC_USER_AGENT is not set.\n"
+            "Add this to your .env file:\n"
+            '  SEC_USER_AGENT=Pranav your-real-email@domain.com\n'
+            "The SEC blocks requests that don't identify the caller."
+        )
+    return ua
+
+
 def load_ticker_map() -> dict:
     if not TICKER_MAP_PATH.exists():
         sys.exit(
@@ -98,18 +110,17 @@ def load_ticker_map() -> dict:
     return json.loads(TICKER_MAP_PATH.read_text())
 
 
-def fetch_company_facts(session: requests.Session, cik: str) -> dict | None:
-    """Fetch one company's facts with retry. Returns None on hard failure."""
+def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | None:
+    """Fetch one company's facts with retry. None on hard failure."""
     url = FACTS_URL.format(cik=cik)
     backoff = INITIAL_BACKOFF
 
     for attempt in range(1, MAX_RETRIES + 1):
-        try:  
-            resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+        try:
+            resp = session.get(url, headers={"User-Agent": ua}, timeout=20)
 
             if resp.status_code == 404:
-                # Some CIKs genuinely have no XBRL facts. Not retryable.
-                return None
+                return None          # genuinely no XBRL facts; not retryable
             if resp.status_code == 429:
                 print(f"    rate limited, backing off {backoff}s")
                 time.sleep(backoff)
@@ -131,9 +142,8 @@ def fetch_company_facts(session: requests.Session, cik: str) -> dict | None:
 def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
     """Pull all reported values for the first matching tag.
 
-    Structure is facts["facts"]["us-gaap"][TAG]["units"][UNIT] -> list
-    of entries. Each entry has start/end dates, val, fy, fp, form,
-    filed, and sometimes frame.
+    Structure: facts["facts"]["us-gaap"][TAG]["units"][UNIT] -> list of
+    entries with start/end dates, val, fy, fp, form, filed.
     """
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
 
@@ -142,7 +152,6 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
             continue
 
         units = us_gaap[tag].get("units", {})
-        # Prefer USD; fall back to share counts for share metrics.
         unit_key = next(
             (u for u in ("USD", "shares", "USD/shares") if u in units),
             None,
@@ -152,7 +161,6 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
 
         rows = []
         for entry in units[unit_key]:
-            # Only periodic reports; skip anything without an end date.
             if "end" not in entry or "val" not in entry:
                 continue
             rows.append({
@@ -174,11 +182,11 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
 
 
 def dedupe_restatements(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep the most recently filed value per (metric, period, form type).
+    """Keep the most recently filed value per (ticker, metric, period).
 
-    The same fiscal period is reported repeatedly as later filings
-    restate it. Sorting by filed date and keeping the last gives the
-    company's most current view of that period.
+    period_start is part of the key deliberately: a Q2 quarterly figure
+    and a half-year figure share an end date but are different facts.
+    Collapsing them would silently drop real data.
     """
     if df.empty:
         return df
@@ -212,24 +220,21 @@ def process_company(ticker: str, cik: str, facts: dict) -> pd.DataFrame:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest SEC fundamentals.")
+    parser = argparse.ArgumentParser(description="Ingest SEC fundamentals to S3.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only process the first N tickers (smoke test)")
     args = parser.parse_args()
 
-    if "your-email@example.com" in USER_AGENT:
-        sys.exit(
-            "ERROR: Set USER_AGENT to your real name and email before running.\n"
-            "The SEC blocks requests that don't identify the caller."
-        )
+    ua = get_user_agent()
+    bucket = get_bucket()
 
     ticker_map = load_ticker_map()
     items = sorted(ticker_map.items())
     if args.limit:
         items = items[:args.limit]
 
-    print(f"Fetching fundamentals for {len(items)} companies "
-          f"(~{len(items) * REQUEST_DELAY:.0f}s minimum)\n")
+    print(f"Bucket:    s3://{bucket}/{S3_PREFIX}")
+    print(f"Companies: {len(items)} (~{len(items) * REQUEST_DELAY:.0f}s minimum)\n")
 
     session = requests.Session()
     frames = []
@@ -239,7 +244,7 @@ def main() -> None:
         cik = info["cik"]
         print(f"[{i}/{len(items)}] {ticker} (CIK {cik})")
 
-        facts = fetch_company_facts(session, cik)
+        facts = fetch_company_facts(session, cik, ua)
         if facts is None:
             print("    no facts returned")
             failed.append(ticker)
@@ -261,11 +266,13 @@ def main() -> None:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / "fundamentals.parquet"
-    combined.to_parquet(out_path, index=False, compression="snappy")
+    # Snapshot key, dated so history is preserved rather than overwritten.
+    # Fundamentals change slowly; a full replace each run is simpler than
+    # incremental logic and the volume is small enough not to matter.
+    key = f"{S3_PREFIX}/snapshot_date={date.today()}/fundamentals.parquet"
+    uri = write_parquet_to_s3(combined, key, bucket=bucket)
 
-    print(f"\nWrote {len(combined):,} rows to {out_path}")
+    print(f"\nWrote {len(combined):,} rows to {uri}")
     print(f"Companies with data: {combined['ticker'].nunique()} / {len(items)}")
     print(f"Metrics covered: {sorted(combined['metric'].unique())}")
     print(f"Period range: {combined['period_end'].min()} to {combined['period_end'].max()}")
