@@ -1,16 +1,18 @@
 """
-Pulls daily OHLCV price data and lands it as date-partitioned Parquet.
+Pulls daily OHLCV price data and lands it as date-partitioned Parquet in S3.
 
-Reads the ticker list from data/ticker_cik_map.json so there's one
-source of truth for the universe.
+Changes from the local version:
+  - writes to S3 instead of disk
+  - --skip-existing lets a scheduled run avoid re-fetching dates already
+    landed, which is the basis of incremental loading
 
 yfinance scrapes Yahoo rather than using a licensed API, so it rate
-limits and fails intermittently. Retry with exponential backoff is
-required, not optional.
+limits and fails intermittently. Retry with backoff is required.
 
 Usage:
     python scripts/ingest_prices.py
     python scripts/ingest_prices.py --start 2024-01-01 --end 2024-06-30
+    python scripts/ingest_prices.py --days 5 --skip-existing
 """
 
 import argparse
@@ -23,13 +25,17 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+sys.path.insert(0, str(Path(__file__).parent))
+from s3_utils import get_bucket, list_s3_keys, write_parquet_to_s3
+
 PROJECT_ROOT = Path(__file__).parent.parent
 TICKER_MAP_PATH = PROJECT_ROOT / "data" / "ticker_cik_map.json"
-OUTPUT_DIR = PROJECT_ROOT / "data" / "prices"
 
-BATCH_SIZE = 20          # tickers per yfinance call
+S3_PREFIX = "raw/prices"
+
+BATCH_SIZE = 20
 MAX_RETRIES = 4
-INITIAL_BACKOFF = 2      # seconds; doubles each retry
+INITIAL_BACKOFF = 2
 PAUSE_BETWEEN_BATCHES = 1
 
 
@@ -42,12 +48,23 @@ def load_tickers() -> list[str]:
     return sorted(json.loads(TICKER_MAP_PATH.read_text()).keys())
 
 
-def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
-    """Download one batch with exponential backoff.
+def existing_dates(bucket: str) -> set[str]:
+    """Return the set of dates already present in S3.
 
-    Returns yfinance's wide multi-index frame, or an empty frame if
-    every attempt failed.
+    Keys look like raw/prices/date=2024-01-02/prices.parquet, so the
+    date is parsed straight out of the path. Cheap: one paginated LIST
+    rather than reading any file contents.
     """
+    dates = set()
+    for key in list_s3_keys(f"{S3_PREFIX}/", bucket=bucket):
+        for part in key.split("/"):
+            if part.startswith("date="):
+                dates.add(part.removeprefix("date="))
+    return dates
+
+
+def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+    """Download one batch with exponential backoff."""
     backoff = INITIAL_BACKOFF
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -80,9 +97,9 @@ def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     """Reshape yfinance's wide frame into one row per ticker per date.
 
-    With multiple tickers yfinance returns MultiIndex columns like
-    (Open, AAPL). With a single ticker it returns flat columns. Handle
-    both so a one-ticker batch doesn't silently break.
+    Multiple tickers give MultiIndex columns like (Open, AAPL). A single
+    ticker gives flat columns. Both paths are handled so a one-ticker
+    batch doesn't silently break.
     """
     if df.empty:
         return pd.DataFrame()
@@ -103,8 +120,6 @@ def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     present = [c for c in wanted if c in long_df.columns]
     long_df = long_df[present]
 
-    # Rows where every price field is null are non-trading days or
-    # tickers Yahoo had no data for. Drop them rather than landing nulls.
     price_cols = [c for c in ["open", "high", "low", "close"] if c in long_df.columns]
     long_df = long_df.dropna(subset=price_cols, how="all")
 
@@ -112,48 +127,62 @@ def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return long_df
 
 
-def write_partitioned(df: pd.DataFrame) -> int:
-    """Write one Parquet file per date: data/prices/date=YYYY-MM-DD/prices.parquet
-
-    Hive-style partitioning lets query engines skip whole folders when
-    filtering by date, and makes incremental loads append-only.
-    """
+def upload_partitions(df: pd.DataFrame, bucket: str, skip: set[str]) -> tuple[int, int]:
+    """Write one Parquet object per date. Returns (written, skipped)."""
     if df.empty:
-        return 0
+        return 0, 0
 
-    files_written = 0
+    written = skipped = 0
     for day, group in df.groupby("date"):
-        partition_dir = OUTPUT_DIR / f"date={day}"
-        partition_dir.mkdir(parents=True, exist_ok=True)
-        group.drop(columns=["date"]).to_parquet(
-            partition_dir / "prices.parquet",
-            index=False,
-            compression="snappy",
-        )
-        files_written += 1
-    return files_written
+        day_str = str(day)
+        if day_str in skip:
+            skipped += 1
+            continue
+
+        key = f"{S3_PREFIX}/date={day_str}/prices.parquet"
+        # date is encoded in the key, so storing it in the file too is
+        # redundant. Hive-style partitioning: engines read the path.
+        write_parquet_to_s3(group.drop(columns=["date"]), key, bucket=bucket)
+        written += 1
+
+    return written, skipped
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest daily OHLCV to Parquet.")
-    parser.add_argument("--start", default=str(date.today() - timedelta(days=365)),
-                        help="YYYY-MM-DD (inclusive)")
-    parser.add_argument("--end", default=str(date.today()),
-                        help="YYYY-MM-DD (exclusive, yfinance convention)")
+    parser = argparse.ArgumentParser(description="Ingest daily OHLCV to S3.")
+    parser.add_argument("--start", help="YYYY-MM-DD (inclusive)")
+    parser.add_argument("--end", help="YYYY-MM-DD (exclusive, yfinance convention)")
+    parser.add_argument("--days", type=int,
+                        help="Shorthand: last N days. Overrides --start.")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip dates already present in S3.")
     args = parser.parse_args()
 
+    end = args.end or str(date.today())
+    if args.days:
+        start = str(date.today() - timedelta(days=args.days))
+    else:
+        start = args.start or str(date.today() - timedelta(days=365))
+
+    bucket = get_bucket()
     tickers = load_tickers()
-    print(f"Ingesting {len(tickers)} tickers from {args.start} to {args.end}\n")
+
+    print(f"Bucket:  s3://{bucket}/{S3_PREFIX}")
+    print(f"Window:  {start} to {end}")
+    print(f"Tickers: {len(tickers)}\n")
+
+    skip = existing_dates(bucket) if args.skip_existing else set()
+    if skip:
+        print(f"Found {len(skip)} dates already in S3, will skip those.\n")
 
     all_frames = []
     failed_batches = []
 
     for i in range(0, len(tickers), BATCH_SIZE):
         batch = tickers[i:i + BATCH_SIZE]
-        batch_num = i // BATCH_SIZE + 1
-        print(f"Batch {batch_num}: {len(batch)} tickers")
+        print(f"Batch {i // BATCH_SIZE + 1}: {len(batch)} tickers")
 
-        raw = download_batch(batch, args.start, args.end)
+        raw = download_batch(batch, start, end)
         if raw.empty:
             failed_batches.append(batch)
             continue
@@ -169,10 +198,13 @@ def main() -> None:
                  "Wait a few minutes and retry.")
 
     combined = pd.concat(all_frames, ignore_index=True)
-    files = write_partitioned(combined)
+    print(f"\nUploading {len(combined):,} rows...")
 
-    print(f"\nWrote {len(combined):,} rows across {files} date partitions "
-          f"to {OUTPUT_DIR}")
+    written, skipped = upload_partitions(combined, bucket, skip)
+
+    print(f"\nWrote {written} date partitions to s3://{bucket}/{S3_PREFIX}")
+    if skipped:
+        print(f"Skipped {skipped} dates already present.")
     print(f"Tickers with data: {combined['ticker'].nunique()} / {len(tickers)}")
 
     if failed_batches:

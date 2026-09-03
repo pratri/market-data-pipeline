@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored; this example file is not.
+
+# Your public IP in CIDR form. Get it with: curl.exe ifconfig.me
+# Append /32 to mean "exactly this one address".
+my_ip_cidr = "203.0.113.42/32"
+
+# Name of the EC2 key pair you created for SSH.
+ec2_key_name = "market-pipeline-key"
+
+# Optional overrides:
+# aws_region        = "us-east-1"
+# ec2_instance_type = "t3.small"
