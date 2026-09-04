@@ -1,0 +1,22 @@
+# Copy to ~/.dbt/profiles.yml (C:\Users\Pranav\.dbt\profiles.yml on Windows).
+
+market_data:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "<account_locator>.<region>"
+      user: "<user>"
+      # quote it, YAML can't start a bare value with @ and a few other characters
+      password: "<password>"
+      role: ACCOUNTADMIN
+      database: MARKET_DATA
+      warehouse: MARKET_WH
+
+      # dbt adds a suffix per layer: ANALYTICS_STAGING, _INTERMEDIATE, _MARTS
+      schema: ANALYTICS
+
+      # more than 4 just queues on XSMALL
+      threads: 4
+
+      client_session_keep_alive: false

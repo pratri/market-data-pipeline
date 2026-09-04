@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: int_fundamentals_quarterly
+    description: >
+      Fundamentals pivoted to one row per company-quarter. Flow metrics
+      filtered to true quarterly duration to avoid double-counting, with
+      discrete quarters derived by differencing cumulative year-to-date
+      figures where a filer reports no standalone quarter. Shares
+      outstanding accepts both the instant balance and the
+      weighted-average form.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: period_end
+        tests: [not_null]
+      - name: filed_date
+        description: Latest filing date across the metrics in this quarter.
+        tests: [not_null]
+      - name: revenue_source
+        description: >
+          'as_reported' where the company stated a standalone quarterly
+          figure, 'derived' where it was computed by differencing
+          consecutive cumulative filings (Q2 = H1 - Q1, and so on).
+          Derived values carry slightly more risk of error, so keeping
+          the distinction lets consumers filter if they need to.
+        tests:
+          - accepted_values:
+              values: ['as_reported', 'derived']
+              config:
+                where: "revenue is not null"
+      - name: shares_basis
+        description: >
+          Whether shares_outstanding came from a point-in-time count
+          ('instant') or a weighted average over the quarter
+          ('weighted_average'). Market cap from the latter is
+          approximate rather than exact.
+        tests:
+          - accepted_values:
+              values: ['instant', 'weighted_average']
+              config:
+                where: "shares_outstanding is not null"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, period_end]
+
+  - name: int_prices_daily
+    description: Daily prices with returns and 20-day rolling statistics.
+    columns:
+      - name: trade_date
+        tests: [not_null]
+      - name: ticker
+        tests: [not_null]
+      - name: daily_return
+        description: >
+          Null on each ticker's first observation, which has no prior
+          close to compare against. Expected, not a data problem.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [trade_date, ticker]
