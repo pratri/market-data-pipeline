@@ -1,0 +1,10 @@
+# Dependencies our DAGs need, installed into the Airflow image.
+# Kept separate from the project's requirements.txt: this file must not
+# include airflow itself, which is already in the base image and would
+# cause a version conflict.
+
+yfinance>=0.2.40
+pandas>=2.0
+pyarrow>=14.0
+boto3>=1.34
+requests>=2.31
