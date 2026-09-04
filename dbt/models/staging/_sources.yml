@@ -1,0 +1,54 @@
+version: 2
+
+sources:
+  - name: raw
+    database: MARKET_DATA
+    schema: RAW
+    description: >
+      Landed from S3 via COPY INTO from external stages. Never
+      transformed in place.
+
+    tables:
+      - name: prices
+        description: Daily OHLCV, one row per ticker per trading day.
+        columns:
+          - name: trade_date
+            description: >
+              Recovered from the S3 partition path, not the file
+              contents. The ingestion writes date=YYYY-MM-DD/ folders
+              and drops the column from the Parquet itself.
+            tests:
+              - not_null
+          - name: ticker
+            tests:
+              - not_null
+          - name: close
+            tests:
+              - not_null
+
+      - name: fundamentals
+        description: >
+          SEC XBRL facts, long format: one row per company per metric
+          per reporting period. Contains multiple dated snapshots, so
+          downstream models must filter to the latest.
+        columns:
+          - name: ticker
+            tests:
+              - not_null
+          - name: metric
+            tests:
+              - not_null
+              - accepted_values:
+                  values:
+                    - revenue
+                    - net_income
+                    - operating_income
+                    - total_assets
+                    - total_liabilities
+                    - stockholders_equity
+                    - shares_outstanding
+                    - cash_and_equivalents
+                    - operating_cash_flow
+          - name: period_end
+            tests:
+              - not_null
