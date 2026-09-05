@@ -133,9 +133,6 @@ jobs:
         working-directory: dbt
         run: dbt parse
 
-      - name: Compile SQL
-        working-directory: dbt
-        run: dbt compile
 
   build:
     name: Build and test against Snowflake
