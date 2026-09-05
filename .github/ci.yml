@@ -1,0 +1,206 @@
+name: CI
+
+# Two jobs with deliberately different triggers.
+#
+# `validate` runs on every push and pull request. It costs nothing,
+# needs no credentials, and catches the majority of what actually
+# breaks when editing models: broken ref() calls, Jinja errors, SQL
+# that won't parse.
+#
+# `build` runs only when triggered by hand. It connects to Snowflake
+# and runs the models and tests for real, which is the only way to
+# catch data-dependent failures. It's manual rather than automatic
+# because the warehouse runs on a finite trial balance, and because a
+# workflow that starts failing when the trial expires would leave a
+# red X on the repo permanently.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:        # the "Run workflow" button
+
+jobs:
+
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # Compile-only check: catches syntax errors and undefined names
+      # without enforcing a style opinion nobody agreed to.
+      - name: Check for syntax errors and undefined names
+        run: ruff check scripts/ dags/ --select E9,F63,F7,F82
+
+      - name: Report style issues without failing
+        run: ruff check scripts/ dags/ --exit-zero
+
+  validate-dags:
+    name: Validate Airflow DAGs
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Importing the DAG files is the real test: it catches the
+      # scheduling errors, bad cron expressions and import failures
+      # that would otherwise only surface when the scheduler picks
+      # them up.
+      - name: Install Airflow
+        run: pip install "apache-airflow==3.0.2" pendulum
+
+      - name: Check DAGs import cleanly
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+          AIRFLOW_HOME: ${{ github.workspace }}/.airflow
+        run: |
+          python -c "
+          import sys, pathlib, importlib.util
+          failed = []
+          for path in pathlib.Path('dags').glob('*.py'):
+              spec = importlib.util.spec_from_file_location(path.stem, path)
+              module = importlib.util.module_from_spec(spec)
+              try:
+                  spec.loader.exec_module(module)
+                  print(f'OK   {path.name}')
+              except Exception as exc:
+                  print(f'FAIL {path.name}: {type(exc).__name__}: {exc}')
+                  failed.append(path.name)
+          sys.exit(1 if failed else 0)
+          "
+
+  validate-dbt:
+    name: Validate dbt models
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dbt
+        run: pip install dbt-core dbt-snowflake
+
+      # dbt parse builds the model DAG and resolves every ref() and
+      # source() without connecting to the warehouse. A typo'd ref or
+      # a circular dependency fails here.
+      #
+      # A profile is still required for parsing, so a dummy one is
+      # written with credentials that are never used. This is why the
+      # job needs no secrets.
+      - name: Write dummy profile
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml <<'EOF'
+          market_data:
+            target: ci
+            outputs:
+              ci:
+                type: snowflake
+                account: not-used-for-parsing
+                user: ci
+                password: ci
+                role: ci
+                database: MARKET_DATA
+                warehouse: ci
+                schema: ANALYTICS
+                threads: 1
+          EOF
+
+      - name: Install dbt packages
+        working-directory: dbt
+        run: dbt deps
+
+      - name: Parse models and resolve dependencies
+        working-directory: dbt
+        run: dbt parse
+
+      - name: Compile SQL
+        working-directory: dbt
+        run: dbt compile
+
+  build:
+    name: Build and test against Snowflake
+    runs-on: ubuntu-latest
+
+    # Manual only. Connects to the warehouse and costs credits.
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dbt
+        run: pip install dbt-core dbt-snowflake
+
+      # Credentials come from repository secrets, injected as
+      # environment variables. They never appear in the repo, and
+      # GitHub masks them in logs.
+      - name: Write profile from secrets
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml <<EOF
+          market_data:
+            target: ci
+            outputs:
+              ci:
+                type: snowflake
+                account: "${SNOWFLAKE_ACCOUNT}"
+                user: "${SNOWFLAKE_USER}"
+                password: "${SNOWFLAKE_PASSWORD}"
+                role: ACCOUNTADMIN
+                database: MARKET_DATA
+                warehouse: MARKET_WH
+                schema: ANALYTICS_CI
+                threads: 4
+          EOF
+
+      - name: Install dbt packages
+        working-directory: dbt
+        run: dbt deps
+
+      # dbt build runs models and their tests interleaved, so a failing
+      # test stops downstream models rather than letting bad data
+      # propagate. Preferable to `dbt run` followed by `dbt test`.
+      - name: Build models and run tests
+        working-directory: dbt
+        run: dbt build
+
+      # Uploaded regardless of outcome: when a run fails, the logs are
+      # exactly what you need, and they're gone once the runner is
+      # destroyed.
+      - name: Upload dbt artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-artifacts
+          path: |
+            dbt/target/
+            dbt/logs/
+          retention-days: 7
