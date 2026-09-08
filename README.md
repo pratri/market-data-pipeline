@@ -156,7 +156,7 @@ retry logic with exponential backoff, but it's a real fragility.
 **Weighted-average share counts make market cap approximate** for the
 companies that use them. `shares_basis` tells you which rows those are.
 
-**Single-node deployment.** LocalExecutor on one t3.small. Fine for two
+**Single-node deployment.** LocalExecutor on one EC2 box. Fine for two
 DAGs and 64 tickers, not what you'd run for anything real.
 
 ## Running it
@@ -183,9 +183,39 @@ For the EC2 deployment, clone onto the instance, drop the local AWS
 credentials mount from `docker-compose.yaml` (the instance profile
 supplies credentials automatically), and `docker compose up -d`.
 
-One gotcha: create and chown the `logs` directory before starting, or the
-dag-processor can't write and fails to parse anything.
+### Deployment notes
+
+Three things that cost me time on the box and aren't obvious from the
+docs.
+
+**A t3.small can't run this.** 2 GB isn't enough for Airflow 3's four
+services plus a task subprocess. It came up fine and then the first
+scheduled run hung: the scheduler went unhealthy, tasks failed with
+`httpx.ConnectError: Connection refused` trying to reach the API server,
+and the scheduler couldn't find the DAG in `serialized_dag`. All of it
+traced back to the box sitting at ~300 MB available with half a gig in
+swap. t3.medium (4 GB) is the floor.
+
+**Airflow 3 workers need the API server URL.** Tasks talk back over HTTP
+now instead of writing to the database directly, so
+`AIRFLOW__CORE__EXECUTION_API_SERVER_URL` has to point at the apiserver
+container. Without it the worker resolves to localhost and gets
+connection refused.
+
+**Create and chown the logs directory before starting.** Docker creates
+missing mount directories as root, so the dag-processor can't write its
+per-file logs and silently parses nothing — `airflow dags list` just
+returns "No data found" with no import errors to explain it.
 
 ```bash
 mkdir -p logs && sudo chown -R 1000:0 logs
+```
+
+**Login isn't admin/admin.** Airflow 3 replaced the old user table with
+SimpleAuthManager, so `airflow users create` doesn't exist unless you
+install and configure the FAB provider. The generated password is in
+`$AIRFLOW_HOME/simple_auth_manager_passwords.json.generated`:
+
+```bash
+docker compose exec apiserver cat /opt/airflow/simple_auth_manager_passwords.json.generated
 ```
