@@ -1,15 +1,15 @@
 # Airflow 3 with LocalExecutor.
 #
-# LocalExecutor rather than Celery: this deploys to a single 2 GB EC2
-# box, so distributing tasks across worker machines buys nothing. Same
-# config locally and on the instance means local success actually
+# LocalExecutor rather than Celery: this deploys to a single EC2 box, so
+# distributing tasks across worker machines buys nothing. Running the
+# same config locally and on the instance means local success actually
 # predicts remote success.
 #
 # Services:
 #   postgres     - Airflow's metadata database (DAG state, task history)
-#   airflow-init - one-shot: runs DB migrations, creates the admin user
+#   airflow-init - one-shot: runs DB migrations
 #   scheduler    - decides what runs when, and runs it (LocalExecutor)
-#   apiserver    - the web UI (Airflow 3 renamed this from "webserver")
+#   apiserver    - web UI and the execution API workers call back into
 #   dag-processor- parses DAG files (a separate process in Airflow 3)
 
 x-airflow-common: &airflow-common
@@ -17,23 +17,34 @@ x-airflow-common: &airflow-common
   image: market-pipeline-airflow:latest
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
+
+    # Airflow 3 tasks talk back to the API server over HTTP rather than
+    # writing to the database directly. Without this the worker resolves
+    # to localhost and every task dies with connection refused.
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://apiserver:8080/execution/
+
+    # Workers authenticate to that API with a signed token. If this
+    # isn't set, each container generates its own secret at startup, the
+    # signature never verifies, and tasks sit in `queued` forever with
+    # "Invalid auth token: Signature verification failed" buried in a
+    # retry traceback.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
 
-    # Fernet key encrypts connection passwords and variables at rest.
-    # Generate your own (see README) rather than using a shared one.
+    # Encrypts connection passwords and variables at rest.
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
 
     # Passed through to the DAGs so scripts can reach S3 and SEC.
     # On EC2 the instance profile supplies AWS credentials automatically,
-    # so AWS keys are deliberately not listed here.
+    # so AWS keys are deliberately absent here.
     S3_BUCKET: ${S3_BUCKET}
     AWS_REGION: ${AWS_REGION:-us-east-1}
     SEC_USER_AGENT: ${SEC_USER_AGENT}
 
-    # Our scripts import s3_utils as a sibling module and read
+    # Scripts import s3_utils as a sibling module and read
     # data/ticker_cik_map.json relative to the project root.
     PYTHONPATH: /opt/airflow/project/scripts
 
@@ -42,10 +53,12 @@ x-airflow-common: &airflow-common
     - ./logs:/opt/airflow/logs
     - ./scripts:/opt/airflow/project/scripts
     - ./data:/opt/airflow/project/data
+    # Local development only. Delete this line on EC2, where the
+    # instance profile supplies credentials via the metadata service.
     - ${USERPROFILE}/.aws:/home/airflow/.aws:ro
 
-  # Run as the host user so files written into mounted volumes (logs,
-  # especially) aren't owned by root and unreadable from Windows.
+  # Run as the host user so files written into mounted volumes aren't
+  # root-owned. On Linux set AIRFLOW_UID to `id -u`.
   user: "${AIRFLOW_UID:-50000}:0"
 
   depends_on:
@@ -68,22 +81,20 @@ services:
       start_period: 5s
     restart: always
 
-  # Runs once and exits. Everything else waits for it to finish
-  # successfully, so migrations never race the scheduler.
+  # Runs once and exits. Everything else waits for it, so migrations
+  # never race the scheduler.
+  #
+  # No user creation here: Airflow 3 replaced the old user table with
+  # SimpleAuthManager, which generates a password on first start and
+  # writes it to simple_auth_manager_passwords.json.generated. The
+  # Airflow 2 `airflow users create` command doesn't exist unless you
+  # install and configure the FAB provider.
   airflow-init:
     <<: *airflow-common
     entrypoint: /bin/bash
     command:
       - -c
-      - |
-        airflow db migrate
-        airflow users create \
-          --username admin \
-          --password admin \
-          --firstname Admin \
-          --lastname User \
-          --role Admin \
-          --email admin@example.com || true
+      - airflow db migrate
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: "true"

@@ -202,6 +202,15 @@ now instead of writing to the database directly, so
 container. Without it the worker resolves to localhost and gets
 connection refused.
 
+**And a shared JWT secret.** Workers authenticate to the API server with
+a signed token. If `AIRFLOW__API_AUTH__JWT_SECRET` isn't set, every
+container generates its own on startup, so the signature never verifies
+and tasks sit in `queued` forever. The error is
+`Invalid auth token: Signature verification failed`, buried in a
+tenacity retry traceback, alongside a misleading
+`not found in serialized_dag table` that sends you looking at DAG
+parsing instead of auth.
+
 **Create and chown the logs directory before starting.** Docker creates
 missing mount directories as root, so the dag-processor can't write its
 per-file logs and silently parses nothing — `airflow dags list` just
