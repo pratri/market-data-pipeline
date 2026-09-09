@@ -258,6 +258,53 @@ pivoted as (
 
 ),
 
+-- Carry the last known share count forward.
+--
+-- Most companies report CommonStockSharesOutstanding only in their
+-- annual filing and omit it from quarterlies. NVDA reports it at its
+-- January fiscal year end and nowhere else; IBM in December; DIS in
+-- September. That left 12 of 64 companies with no share count on the
+-- most recent quarter, and with no shares there's no market cap, so no
+-- price-to-book, no P/E and no price-to-sales.
+--
+-- Share counts don't disappear between filings, so the last known value
+-- is a reasonable stand-in. It is a stand-in though: NVDA went from
+-- 24,477M to 24,304M over a year, so a carried-forward count can be
+-- stale by up to three quarters and off by a percent or so from
+-- buybacks. shares_basis records which rows are carried forward so
+-- consumers can exclude them if that matters.
+--
+-- Deliberately forward only. Filling backward would attribute a share
+-- count to periods before the company reported one, which is the same
+-- lookahead problem the filing-date join exists to avoid.
+shares_filled as (
+
+    select
+        * exclude (shares_outstanding, shares_basis),
+
+        coalesce(
+            shares_outstanding,
+            last_value(shares_outstanding ignore nulls) over (
+                partition by ticker
+                order by period_end
+                rows between unbounded preceding and current row
+            )
+        ) as shares_outstanding,
+
+        case
+            when shares_outstanding is not null then shares_basis
+            when last_value(shares_outstanding ignore nulls) over (
+                     partition by ticker
+                     order by period_end
+                     rows between unbounded preceding and current row
+                 ) is not null
+            then 'carried_forward'
+        end as shares_basis
+
+    from pivoted
+
+),
+
 with_growth as (
 
     select
@@ -268,7 +315,7 @@ with_growth as (
             as year_ago_revenue,
         lag(net_income, 4) over (partition by ticker order by period_end)
             as year_ago_net_income
-    from pivoted
+    from shares_filled
 
 )
 
