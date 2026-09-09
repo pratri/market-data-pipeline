@@ -43,6 +43,20 @@ so no data passes through an intermediate process.
 EC2 instance and its security group. `terraform destroy` tears the whole
 thing down, which matters when you're running it on trial credits.
 
+### dbt model lineage
+
+![dbt lineage](docs/lineage-graph.png)
+
+### Airflow
+
+Both DAGs on their own schedules.
+
+![Airflow DAGs](docs/airflow-dags.png)
+
+Run history. The scheduled ones fired on their own.
+
+![Airflow runs](docs/airflow-runs.png)
+
 ## The two decisions that mattered
 
 ### Joining fundamentals to prices by filing date
