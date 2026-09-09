@@ -140,14 +140,33 @@ def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | 
 
 
 def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
-    """Pull all reported values for the first matching tag.
+    """Pull reported values across ALL candidate tags, not just the first.
 
     Structure: facts["facts"]["us-gaap"][TAG]["units"][UNIT] -> list of
     entries with start/end dates, val, fy, fp, form, filed.
+
+    Why this merges rather than returning on first match: companies
+    switch tags mid-history. NVDA reported revenue under
+    RevenueFromContractWithCustomerExcludingAssessedTax until Jan 2022
+    (28 entries) and has used Revenues ever since (280 entries). Taking
+    the first tag with any data gave NVDA no revenue after 2022 at all,
+    which silently killed its net margin and price-to-sales for four
+    years of the fact table.
+
+    Both tags are read and the results merged. Where two tags report the
+    same period, the higher-priority one wins — that's what the ordering
+    in METRIC_TAGS is for, and it matters because an overlap during a
+    transition should resolve to the more specific concept rather than
+    whichever happened to be read last.
     """
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
 
-    for tag in tag_candidates:
+    # Keyed by (period_start, period_end, form, accession) so the same
+    # fact reported under two tags collapses to one row, while genuinely
+    # different periods stay separate.
+    merged: dict[tuple, dict] = {}
+
+    for priority, tag in enumerate(tag_candidates):
         if tag not in us_gaap:
             continue
 
@@ -159,11 +178,26 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
         if unit_key is None:
             continue
 
-        rows = []
         for entry in units[unit_key]:
             if "end" not in entry or "val" not in entry:
                 continue
-            rows.append({
+
+            key = (
+                entry.get("start"),
+                entry["end"],
+                entry.get("form"),
+                entry.get("accn"),
+            )
+
+            # Lower priority number means earlier in the candidate list,
+            # so it wins. Without this check a later tag would overwrite
+            # a more specific earlier one on overlapping periods.
+            existing = merged.get(key)
+            if existing is not None and existing["_priority"] <= priority:
+                continue
+
+            merged[key] = {
+                "_priority": priority,
                 "tag": tag,
                 "unit": unit_key,
                 "period_start": entry.get("start"),
@@ -174,11 +208,13 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
                 "form": entry.get("form"),
                 "filed": entry.get("filed"),
                 "accession": entry.get("accn"),
-            })
-        if rows:
-            return rows
+            }
 
-    return []
+    # _priority was only needed while merging.
+    return [
+        {k: v for k, v in row.items() if k != "_priority"}
+        for row in merged.values()
+    ]
 
 
 def dedupe_restatements(df: pd.DataFrame) -> pd.DataFrame:
