@@ -15,16 +15,12 @@ clean-targets:
 
 models:
   market_data:
-    # Staging models are views: they're thin renames and casts over raw,
-    # so materializing them as tables would duplicate storage for no
-    # query-time benefit.
+    # views, these are just renames over raw
     staging:
       +materialized: view
       +schema: staging
 
-    # Intermediate models do the heavy filtering and pivoting. Tables,
-    # because the marts read them repeatedly and recomputing a view
-    # every time is wasteful.
+    # tables, since the marts read them repeatedly
     intermediate:
       +materialized: table
       +schema: intermediate

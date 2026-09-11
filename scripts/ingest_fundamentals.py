@@ -1,22 +1,12 @@
 """
-Pulls quarterly fundamentals from SEC EDGAR and lands them as Parquet in S3.
+Pulls fundamentals from SEC EDGAR companyfacts and writes a dated parquet
+snapshot to S3.
 
-Three real problems this handles:
-
-1. TAG INCONSISTENCY. Companies report the same concept under different
-   US-GAAP tags. Revenue might be Revenues,
-   RevenueFromContractWithCustomerExcludingAssessedTax, or SalesRevenueNet.
-   A priority list per metric resolves it; first tag present wins.
-
-2. RESTATEMENTS. The same fiscal period appears repeatedly as later
-   filings restate it. Each entry has a `filed` date, so we keep the
-   most recently filed value per period.
-
-3. RATE LIMITING. SEC allows ~10 req/sec. One sequential call per
-   company with a deliberate delay stays well under.
-
-Fundamentals update quarterly, so unlike prices this writes a single
-snapshot object rather than date partitions.
+- A metric can show up under several us-gaap tags, so all candidate tags
+  are read and merged.
+- The same period gets repeated in later filings. Only the latest filed
+  value per period is kept.
+- SEC allows about 10 requests/sec, so calls are spaced out.
 
 Usage:
     python scripts/ingest_fundamentals.py
@@ -43,7 +33,7 @@ TICKER_MAP_PATH = PROJECT_ROOT / "data" / "ticker_cik_map.json"
 S3_PREFIX = "raw/fundamentals"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
-REQUEST_DELAY = 0.15     # ~6.7 req/sec, under SEC's 10/sec limit
+REQUEST_DELAY = 0.15     # ~6.7 req/sec
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 3
 
@@ -84,10 +74,9 @@ METRIC_TAGS = {
 
 
 def get_user_agent() -> str:
-    """SEC blocks requests that don't identify the caller by name and email.
+    """SEC blocks requests without a name and email in the User-Agent.
 
-    Read from .env rather than hardcoded so a personal address doesn't
-    end up in a public repo.
+    Read from .env so the address stays out of the repo.
     """
     load_env()
     ua = os.environ.get("SEC_USER_AGENT")
@@ -111,7 +100,7 @@ def load_ticker_map() -> dict:
 
 
 def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | None:
-    """Fetch one company's facts with retry. None on hard failure."""
+    """Fetch one company's facts with retries. None if it fails."""
     url = FACTS_URL.format(cik=cik)
     backoff = INITIAL_BACKOFF
 
@@ -120,7 +109,7 @@ def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | 
             resp = session.get(url, headers={"User-Agent": ua}, timeout=20)
 
             if resp.status_code == 404:
-                return None          # genuinely no XBRL facts; not retryable
+                return None          # no XBRL facts, don't retry
             if resp.status_code == 429:
                 print(f"    rate limited, backing off {backoff}s")
                 time.sleep(backoff)
@@ -140,30 +129,20 @@ def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | 
 
 
 def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
-    """Pull reported values across ALL candidate tags, not just the first.
+    """Collect a metric's values across all candidate tags.
 
-    Structure: facts["facts"]["us-gaap"][TAG]["units"][UNIT] -> list of
-    entries with start/end dates, val, fy, fp, form, filed.
+    facts["facts"]["us-gaap"][TAG]["units"][UNIT] is a list of entries with
+    start/end, val, fy, fp, form and filed.
 
-    Why this merges rather than returning on first match: companies
-    switch tags mid-history. NVDA reported revenue under
-    RevenueFromContractWithCustomerExcludingAssessedTax until Jan 2022
-    (28 entries) and has used Revenues ever since (280 entries). Taking
-    the first tag with any data gave NVDA no revenue after 2022 at all,
-    which silently killed its net margin and price-to-sales for four
-    years of the fact table.
-
-    Both tags are read and the results merged. Where two tags report the
-    same period, the higher-priority one wins — that's what the ordering
-    in METRIC_TAGS is for, and it matters because an overlap during a
-    transition should resolve to the more specific concept rather than
-    whichever happened to be read last.
+    Companies switch tags over time. NVDA used
+    RevenueFromContractWithCustomerExcludingAssessedTax until Jan 2022 and
+    Revenues after, so stopping at the first tag with data lost four years
+    of NVDA revenue. When two tags report the same fact in the same filing,
+    the one listed first in METRIC_TAGS wins.
     """
     us_gaap = facts.get("facts", {}).get("us-gaap", {})
 
-    # Keyed by (period_start, period_end, form, accession) so the same
-    # fact reported under two tags collapses to one row, while genuinely
-    # different periods stay separate.
+    # same fact under two tags collapses to one row, different periods don't
     merged: dict[tuple, dict] = {}
 
     for priority, tag in enumerate(tag_candidates):
@@ -189,9 +168,7 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
                 entry.get("accn"),
             )
 
-            # Lower priority number means earlier in the candidate list,
-            # so it wins. Without this check a later tag would overwrite
-            # a more specific earlier one on overlapping periods.
+            # lower number = earlier in the list = wins
             existing = merged.get(key)
             if existing is not None and existing["_priority"] <= priority:
                 continue
@@ -210,7 +187,7 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
                 "accession": entry.get("accn"),
             }
 
-    # _priority was only needed while merging.
+    # drop the helper field
     return [
         {k: v for k, v in row.items() if k != "_priority"}
         for row in merged.values()
@@ -218,11 +195,10 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
 
 
 def dedupe_restatements(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep the most recently filed value per (ticker, metric, period).
+    """Keep the latest filed value per (ticker, metric, period_start, period_end).
 
-    period_start is part of the key deliberately: a Q2 quarterly figure
-    and a half-year figure share an end date but are different facts.
-    Collapsing them would silently drop real data.
+    period_start is in the key because Q2 and H1 share an end date but are
+    different facts.
     """
     if df.empty:
         return df
@@ -302,9 +278,7 @@ def main() -> None:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Snapshot key, dated so history is preserved rather than overwritten.
-    # Fundamentals change slowly; a full replace each run is simpler than
-    # incremental logic and the volume is small enough not to matter.
+    # dated key so older snapshots aren't overwritten
     key = f"{S3_PREFIX}/snapshot_date={date.today()}/fundamentals.parquet"
     uri = write_parquet_to_s3(combined, key, bucket=bucket)
 

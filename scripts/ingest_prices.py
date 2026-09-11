@@ -1,13 +1,8 @@
 """
-Pulls daily OHLCV price data and lands it as date-partitioned Parquet in S3.
+Daily OHLCV from Yahoo Finance, written to S3 as one parquet file per date.
 
-Changes from the local version:
-  - writes to S3 instead of disk
-  - --skip-existing lets a scheduled run avoid re-fetching dates already
-    landed, which is the basis of incremental loading
-
-yfinance scrapes Yahoo rather than using a licensed API, so it rate
-limits and fails intermittently. Retry with backoff is required.
+yfinance scrapes Yahoo and fails now and then, so downloads retry with
+backoff. --skip-existing skips dates already in S3.
 
 Usage:
     python scripts/ingest_prices.py
@@ -49,12 +44,7 @@ def load_tickers() -> list[str]:
 
 
 def existing_dates(bucket: str) -> set[str]:
-    """Return the set of dates already present in S3.
-
-    Keys look like raw/prices/date=2024-01-02/prices.parquet, so the
-    date is parsed straight out of the path. Cheap: one paginated LIST
-    rather than reading any file contents.
-    """
+    """Dates already in S3, parsed from keys like raw/prices/date=2024-01-02/prices.parquet."""
     dates = set()
     for key in list_s3_keys(f"{S3_PREFIX}/", bucket=bucket):
         for part in key.split("/"):
@@ -64,7 +54,7 @@ def existing_dates(bucket: str) -> set[str]:
 
 
 def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
-    """Download one batch with exponential backoff."""
+    """Download one batch, retrying with exponential backoff."""
     backoff = INITIAL_BACKOFF
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -74,7 +64,7 @@ def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
                 start=start,
                 end=end,
                 interval="1d",
-                auto_adjust=False,   # keep raw OHLC; adjustment belongs in dbt
+                auto_adjust=False,   # raw OHLC plus adj_close (close is still split-adjusted)
                 group_by="column",
                 threads=True,
                 progress=False,
@@ -95,11 +85,10 @@ def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 
 
 def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
-    """Reshape yfinance's wide frame into one row per ticker per date.
+    """Reshape yfinance's wide frame to one row per ticker per date.
 
-    Multiple tickers give MultiIndex columns like (Open, AAPL). A single
-    ticker gives flat columns. Both paths are handled so a one-ticker
-    batch doesn't silently break.
+    Several tickers come back with (field, ticker) columns, a single ticker
+    comes back flat. Both are handled.
     """
     if df.empty:
         return pd.DataFrame()
@@ -128,7 +117,7 @@ def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
 
 
 def upload_partitions(df: pd.DataFrame, bucket: str, skip: set[str]) -> tuple[int, int]:
-    """Write one Parquet object per date. Returns (written, skipped)."""
+    """Write one parquet file per date. Returns (written, skipped)."""
     if df.empty:
         return 0, 0
 
@@ -140,8 +129,7 @@ def upload_partitions(df: pd.DataFrame, bucket: str, skip: set[str]) -> tuple[in
             continue
 
         key = f"{S3_PREFIX}/date={day_str}/prices.parquet"
-        # date is encoded in the key, so storing it in the file too is
-        # redundant. Hive-style partitioning: engines read the path.
+        # date is in the key, no need to store it in the file
         write_parquet_to_s3(group.drop(columns=["date"]), key, bucket=bucket)
         written += 1
 

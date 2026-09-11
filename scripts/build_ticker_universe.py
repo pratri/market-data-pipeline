@@ -1,15 +1,9 @@
 """
-Maps ticker symbols to SEC CIK numbers.
+Builds data/ticker_cik_map.json (ticker -> zero-padded CIK).
 
-The SEC's company facts API doesn't accept ticker symbols. To pull
-Apple's financials you need its CIK (Central Index Key), zero-padded
-to 10 digits: CIK0000320193. This script builds that mapping once so
-the fundamentals ingestion script can look it up.
-
-Source: https://www.sec.gov/files/company_tickers.json (public, no auth)
-
-Set USER_AGENT below to your real name and email before running.
-The SEC blocks requests without a descriptive User-Agent.
+The companyfacts API takes CIKs, not tickers. Source is SEC's public
+https://www.sec.gov/files/company_tickers.json. SEC wants a name and email
+in the User-Agent.
 """
 
 import json
@@ -20,7 +14,7 @@ import requests
 
 SEC_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 
-# REQUIRED: replace with your real name and email.
+# your name and email
 USER_AGENT = "Pranav pranteja@gmail.com"
 
 OUTPUT_PATH = Path(__file__).parent.parent / "data" / "ticker_cik_map.json"
@@ -37,12 +31,9 @@ TICKER_UNIVERSE = [
 
 
 def fetch_sec_lookup() -> dict:
-    """Fetch and parse the SEC's full ticker-to-CIK file.
+    """Fetch SEC's ticker file and return {TICKER: {cik, title}}.
 
-    SEC returns a dict with meaningless numeric string keys:
-        {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
-
-    Returns a dict keyed by uppercase ticker with zero-padded CIKs.
+    SEC's JSON looks like {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
     """
     if "your-email@example.com" in USER_AGENT:
         sys.exit(
@@ -60,8 +51,7 @@ def fetch_sec_lookup() -> dict:
     lookup = {}
     for entry in response.json().values():
         ticker = entry["ticker"].upper()
-        # zfill(10) because the API endpoint requires CIK0000320193,
-        # not CIK320193. The JSON gives us the unpadded integer.
+        # API wants CIK0000320193, the JSON gives 320193
         lookup[ticker] = {
             "cik": str(entry["cik_str"]).zfill(10),
             "title": entry["title"],

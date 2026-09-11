@@ -1,8 +1,4 @@
-# Copy this to ~/.dbt/profiles.yml (create the .dbt folder if needed).
-# On Windows that path is C:\Users\Pranav\.dbt\profiles.yml
-#
-# This file lives OUTSIDE the repo so credentials are never committed.
-# That's why it's included here only as an example.
+# Copy to ~/.dbt/profiles.yml (C:\Users\Pranav\.dbt\profiles.yml on Windows).
 
 market_data:
   target: dev
@@ -16,13 +12,10 @@ market_data:
       database: MARKET_DATA
       warehouse: MARKET_WH
 
-      # dbt writes into this schema. The dbt_project.yml config appends
-      # a suffix per layer, so models land in ANALYTICS_staging,
-      # ANALYTICS_intermediate, ANALYTICS_marts.
+      # dbt adds a suffix per layer: ANALYTICS_STAGING, _INTERMEDIATE, _MARTS
       schema: ANALYTICS
 
-      # Parallel model builds. 4 is comfortable on an XSMALL warehouse;
-      # higher just queues.
+      # more than 4 just queues on XSMALL
       threads: 4
 
       client_session_keep_alive: false

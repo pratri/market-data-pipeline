@@ -1,26 +1,15 @@
--- Daily fact table: price and valuation metrics per ticker per day.
+-- Daily prices joined to the latest fundamentals filed on or before each
+-- trade date.
 --
--- THE JOIN IS THE POINT OF THIS MODEL.
+-- The join is on filed date, not period end. Q2 ends June 30 but isn't
+-- reported until August, so joining on period end would put earnings into
+-- July rows before anyone had them (lookahead bias).
 --
--- Fundamentals attach by FILING date, not period end. A company's Q2
--- ends 30 June but isn't reported until early August. Joining on period
--- end would compute July P/E ratios from earnings nobody knew yet:
--- lookahead bias, and the most common way a backtest produces results
--- that evaporate in live trading.
+-- Revenue ratios are nulled where revenue isn't comparable, see
+-- dim_companies.
 --
--- The as-of join takes, for each trading day, the most recent filing on
--- or before that day. Every figure here could have been computed by
--- someone standing at that date with the information then public.
---
--- Revenue-based ratios are suppressed for companies where the metric
--- doesn't apply (see dim_companies for why banks are excluded rather
--- than force-fitted).
---
--- KNOWN LIMITATION: ingestion keeps the most recently filed value per
--- period, so restatements overwrite originals. Strict point-in-time
--- data would preserve what was known at each moment, requiring the full
--- restatement history rather than a deduplicated view. Out of scope
--- here; the effect is that older rows may carry later-revised figures.
+-- Known limitation: ingestion keeps the latest filed value per period, so
+-- restatements overwrite the original numbers.
 
 with prices as (
 
@@ -101,36 +90,26 @@ most_recent as (
 
 ),
 
--- Trailing twelve months across the four most recent quarters. TTM
--- rather than a single quarter because one quarter is noisy and
--- seasonal, and valuation ratios built on it swing meaninglessly.
+
 ttm as (
 
     select
         ticker,
         period_end,
 
-        sum(revenue) over (
-            partition by ticker order by period_end
-            rows between 3 preceding and current row
-        ) as ttm_revenue,
+        sum(revenue) over w      as ttm_revenue,
+        sum(net_income) over w   as ttm_net_income,
+        count(revenue) over w    as revenue_quarters_in_ttm,
+        count(net_income) over w as income_quarters_in_ttm,
 
-        sum(net_income) over (
-            partition by ticker order by period_end
-            rows between 3 preceding and current row
-        ) as ttm_net_income,
-
-        count(revenue) over (
-            partition by ticker order by period_end
-            rows between 3 preceding and current row
-        ) as revenue_quarters_in_ttm,
-
-        count(net_income) over (
-            partition by ticker order by period_end
-            rows between 3 preceding and current row
-        ) as income_quarters_in_ttm
+        datediff('day', min(period_end) over w, period_end) as ttm_span_days
 
     from fundamentals
+    window w as (
+        partition by ticker
+        order by period_end
+        rows between 3 preceding and current row
+    )
 
 ),
 
@@ -174,10 +153,9 @@ final as (
         m.net_income_yoy_growth,
         m.net_margin,
 
-        -- Only meaningful with a full four quarters; a partial TTM
-        -- understates and produces a misleadingly low ratio.
+        -- needs all four quarters, a partial TTM understates revenue
         case
-            when t.revenue_quarters_in_ttm = 4
+            when t.revenue_quarters_in_ttm = 4 and t.ttm_span_days between 250 and 290
              and c.revenue_metric_applicable
             then t.ttm_revenue
         end as ttm_revenue,
@@ -189,9 +167,8 @@ final as (
 
         m.close_price * m.shares_outstanding as market_cap,
 
-        -- P/E uses TTM earnings. Null on negative earnings: a negative
-        -- P/E isn't so much wrong as meaningless, and leaving it in
-        -- poisons any average computed across the universe.
+        -- TTM earnings. Null when earnings are negative: a negative P/E
+        -- doesn't mean anything and it wrecks averages.
         case
             when t.income_quarters_in_ttm = 4
              and t.ttm_net_income > 0
@@ -199,8 +176,7 @@ final as (
             then (m.close_price * m.shares_outstanding) / nullif(t.ttm_net_income, 0)
         end as pe_ratio,
 
-        -- Works for financials, which is why it's the right ratio for
-        -- banks where P/S is not.
+        -- P/B works for banks, P/S doesn't
         case
             when m.stockholders_equity > 0 and m.shares_outstanding > 0
             then (m.close_price * m.shares_outstanding)
@@ -208,7 +184,7 @@ final as (
         end as price_to_book,
 
         case
-            when t.revenue_quarters_in_ttm = 4
+            when t.income_quarters_in_ttm = 4 and t.ttm_span_days between 250 and 290
              and t.ttm_revenue > 0
              and m.shares_outstanding > 0
              and c.revenue_metric_applicable
@@ -220,9 +196,7 @@ final as (
             then m.total_liabilities / nullif(m.total_assets, 0)
         end as debt_to_assets,
 
-        -- Staleness of the attached fundamentals. Around 90 means the
-        -- next report is due; a very large value means the company
-        -- stopped filing or the data has a gap.
+        -- ~90 means the next report is due, much higher means a gap
         datediff('day', m.fundamentals_filed_date, m.trade_date)
             as days_since_filing
 
