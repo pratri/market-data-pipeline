@@ -1,22 +1,9 @@
-# ---------------------------------------------------------------------------
-# IAM role that Snowflake assumes to read the S3 bucket.
+# Role Snowflake assumes to read the bucket.
 #
-# This is cross-account access: the role lives in YOUR account, but the
-# principal allowed to assume it lives in SNOWFLAKE's account. Snowflake
-# generates that principal when you create the storage integration, which
-# is why this takes two passes:
-#
-#   pass 1: apply with the placeholder values below, create the Snowflake
-#           integration pointing at this role's ARN, then run
-#           DESC INTEGRATION to read back what Snowflake generated
-#   pass 2: put those values in terraform.tfvars and apply again
-#
-# The external ID is the important part. Without it, any Snowflake account
-# could assume your role, since they all share the same IAM principal.
-# The external ID is unique to your integration and is what stops the
-# "confused deputy" problem where someone else's Snowflake account reads
-# your bucket.
-# ---------------------------------------------------------------------------
+# Takes two applies. First apply with the placeholders, create the storage
+# integration in Snowflake, run DESC INTEGRATION, put the IAM user ARN and
+# external ID into terraform.tfvars, then apply again. The external ID is
+# what stops other Snowflake accounts from assuming this role.
 
 variable "snowflake_iam_user_arn" {
   description = <<-EOT
@@ -47,9 +34,7 @@ data "aws_iam_policy_document" "snowflake_assume_role" {
       identifiers = [var.snowflake_iam_user_arn]
     }
 
-    # This condition is the security boundary. Snowflake sends the
-    # external ID when assuming the role; a different Snowflake account
-    # doesn't know yours and so can't assume it.
+    # external ID check
     condition {
       test     = "StringEquals"
       variable = "sts:ExternalId"
@@ -64,8 +49,7 @@ resource "aws_iam_role" "snowflake" {
   assume_role_policy = data.aws_iam_policy_document.snowflake_assume_role.json
 }
 
-# Read-only. Snowflake loads data out; it has no reason to write back.
-# GetObjectVersion is needed because the bucket has versioning enabled.
+# read only. GetObjectVersion because versioning is on.
 data "aws_iam_policy_document" "snowflake_s3_read" {
   statement {
     sid    = "ReadObjects"
@@ -79,8 +63,7 @@ data "aws_iam_policy_document" "snowflake_s3_read" {
     resources = ["${aws_s3_bucket.raw_data.arn}/*"]
   }
 
-  # ListBucket is required for COPY INTO to enumerate files under a
-  # prefix. Without it you get an empty load and no useful error.
+  # COPY INTO needs ListBucket to find files, otherwise it silently loads nothing
   statement {
     sid    = "ListBucket"
     effect = "Allow"

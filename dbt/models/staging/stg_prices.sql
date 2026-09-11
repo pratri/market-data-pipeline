@@ -1,9 +1,4 @@
--- Thin layer over raw prices: rename, cast, drop load metadata.
---
--- No business logic here deliberately. Staging exists so downstream
--- models never reference source tables directly, which means a change
--- in the raw schema is absorbed in one place instead of rippling
--- through every model.
+-- Rename raw price columns and drop empty rows.
 
 with source as (
 
@@ -25,9 +20,7 @@ renamed as (
 
     from source
 
-    -- Yahoo occasionally returns a row with a date but no price data.
-    -- Excluding here rather than downstream keeps every consumer from
-    -- having to remember the same filter.
+    -- Yahoo sometimes sends a date with no prices
     where close is not null
 
 )

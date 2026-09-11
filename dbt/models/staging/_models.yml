@@ -13,24 +13,19 @@ models:
       - name: close_price
         tests:
           - not_null
-          # Prices are strictly positive. A zero or negative close means
-          # bad source data, not a real market event.
+          # a close of 0 or less is bad data
           - dbt_utils.accepted_range:
               min_value: 0
               inclusive: false
     tests:
-      # The real grain assertion: one row per ticker per day. If this
-      # fails, something upstream is duplicating rows and every
-      # downstream aggregate is wrong.
+      # one row per ticker per day
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
             - trade_date
             - ticker
 
   - name: stg_fundamentals
-    description: >
-      Latest SEC snapshot only, with reporting period classified by
-      duration so flow metrics can be filtered to true quarters.
+    description: Latest SEC snapshot, with each fact labelled by period length.
     columns:
       - name: ticker
         tests:
@@ -47,9 +42,7 @@ models:
           - accepted_values:
               values: ['instant', 'quarterly', 'half_year', 'nine_month', 'annual', 'other']
     tests:
-      # After snapshot filtering, a company should report each metric
-      # once per distinct period. A duplicate here means the snapshot
-      # filter failed and multiple snapshots leaked through.
+      # duplicates here mean more than one snapshot got through
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns:
             - ticker

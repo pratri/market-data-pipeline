@@ -16,8 +16,7 @@ terraform {
 provider "aws" {
   region = var.aws_region
 
-  # Tags applied to every resource this provider creates.
-  # Makes it trivial to find and delete everything later.
+  # tags on every resource, makes cleanup easy
   default_tags {
     tags = {
       Project     = var.project_name

@@ -1,8 +1,8 @@
--- Daily returns and rolling volatility per ticker.
+-- Daily returns and 20-day rolling stats per ticker.
 --
--- Returns use adj_close where available, falling back to close.
--- Adjusted close accounts for splits and dividends; using raw close
--- would show a 50% "loss" on a 2-for-1 split day that never happened.
+-- Returns use adj_close when it's there, so dividends and splits don't
+-- look like price moves. That only holds for splits if the history was
+-- downloaded after the split happened.
 
 with prices as (
 
@@ -57,10 +57,8 @@ select
     volume,
     daily_return,
 
-    -- 20 trading days is roughly one calendar month. The window is
-    -- bounded by rows rather than dates because markets close on
-    -- weekends and holidays, so a date-based window would silently
-    -- include fewer observations in some periods.
+    -- 20 rows is about a trading month. Rows rather than dates so
+    -- weekends and holidays don't shrink the window.
     avg(daily_return) over (
         partition by ticker
         order by trade_date
@@ -79,8 +77,7 @@ select
         rows between 19 preceding and current row
     ) as avg_volume_20d,
 
-    -- Annualized from daily using sqrt(252), the conventional count of
-    -- US trading days in a year.
+    -- annualized with sqrt(252) trading days
     stddev(daily_return) over (
         partition by ticker
         order by trade_date

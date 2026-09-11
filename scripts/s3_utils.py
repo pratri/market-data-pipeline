@@ -1,12 +1,7 @@
 """
-Shared S3 helpers.
+S3 helpers shared by the ingestion scripts.
 
-Both ingestion scripts need to write Parquet to S3, so the logic lives
-here rather than being duplicated.
-
-Config comes from environment variables, loaded from a .env file at the
-project root. The bucket name has a random suffix from Terraform, so
-hardcoding it would make the code work only for one specific bucket.
+Config comes from environment variables, or a .env file in the project root.
 """
 
 import io
@@ -22,15 +17,7 @@ ENV_PATH = PROJECT_ROOT / ".env"
 
 
 def load_env() -> None:
-    """Read KEY=VALUE lines from .env into os.environ.
-
-    Written by hand rather than pulling in python-dotenv: it's twenty
-    lines and one fewer dependency to install on the EC2 box.
-
-    Existing environment variables win, so a value set in the shell
-    overrides the file. That's the conventional precedence and it's what
-    lets Airflow inject config without editing files.
-    """
+    """Load KEY=VALUE lines from .env. Variables already set in the environment win."""
     if not ENV_PATH.exists():
         return
 
@@ -46,7 +33,7 @@ def load_env() -> None:
 
 
 def get_bucket() -> str:
-    """Return the target bucket name, or exit with a useful message."""
+    """Return S3_BUCKET, or exit with a hint on how to set it."""
     load_env()
     bucket = os.environ.get("S3_BUCKET")
     if not bucket:
@@ -60,35 +47,20 @@ def get_bucket() -> str:
 
 
 def get_s3_client():
-    """Build an S3 client.
-
-    boto3 finds credentials automatically, in this order:
-      1. environment variables
-      2. ~/.aws/credentials  (your laptop, from `aws configure`)
-      3. the EC2 instance profile  (the box, no keys needed)
-
-    That last one is why the same code runs unchanged locally and on the
-    instance. Nothing to configure, nothing to leak.
-    """
+    """S3 client. boto3 finds credentials in env vars, ~/.aws, or the EC2 instance profile."""
     load_env()
     region = os.environ.get("AWS_REGION", "us-east-1")
     return boto3.client("s3", region_name=region)
 
 
 def write_parquet_to_s3(df: pd.DataFrame, key: str, bucket: str | None = None) -> str:
-    """Serialize a DataFrame to Parquet in memory and upload it.
-
-    Writing to a BytesIO buffer instead of a temp file avoids touching
-    disk at all, which matters on a small EC2 box with limited space.
-
-    Returns the s3:// URI of the written object.
-    """
+    """Write a DataFrame to S3 as parquet, in memory. Returns the s3:// URI."""
     bucket = bucket or get_bucket()
     client = get_s3_client()
 
     buffer = io.BytesIO()
     df.to_parquet(buffer, index=False, compression="snappy")
-    buffer.seek(0)  # rewind, or you upload zero bytes
+    buffer.seek(0)
 
     try:
         client.put_object(Bucket=bucket, Key=key, Body=buffer.getvalue())
@@ -112,11 +84,7 @@ def write_parquet_to_s3(df: pd.DataFrame, key: str, bucket: str | None = None) -
 
 
 def s3_key_exists(key: str, bucket: str | None = None) -> bool:
-    """Check whether an object already exists.
-
-    Used to skip re-downloading data that's already landed, which is the
-    basis of incremental loading.
-    """
+    """True if the object exists."""
     bucket = bucket or get_bucket()
     client = get_s3_client()
 
@@ -130,12 +98,7 @@ def s3_key_exists(key: str, bucket: str | None = None) -> bool:
 
 
 def list_s3_keys(prefix: str, bucket: str | None = None) -> list[str]:
-    """List every key under a prefix, handling pagination.
-
-    list_objects_v2 returns at most 1000 keys per call. A paginator
-    handles the continuation tokens so you don't silently miss data
-    once the bucket grows past that.
-    """
+    """All keys under a prefix. Paginated, list_objects_v2 returns 1000 at most."""
     bucket = bucket or get_bucket()
     client = get_s3_client()
 

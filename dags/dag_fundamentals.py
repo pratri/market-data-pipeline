@@ -1,14 +1,8 @@
 """
 Weekly SEC fundamentals ingestion.
 
-Companies file 10-Qs and 10-Ks on a quarterly cadence, so daily polling
-would make 64 API calls to find nothing changed. Weekly picks up new
-filings within a few days of publication without hammering SEC.
-
-Each run writes a dated snapshot rather than overwriting, so the
-transformation layer can see how a company's reported figures for a
-given period changed over time. That's not incidental: restatements are
-real and being able to show them is a genuine feature.
+Filings come out quarterly, so weekly picks them up within a few days
+without hitting SEC for nothing. Each run writes a new dated snapshot.
 """
 
 from __future__ import annotations
@@ -35,9 +29,7 @@ from airflow.sdk import dag, task
 def ingest_fundamentals_weekly():
 
     @task(
-        # SEC's rate limit means 64 sequential calls with a deliberate
-        # delay. Generous timeout so a slow response doesn't kill a run
-        # that would otherwise succeed.
+        # 64 calls with a delay between each, so give it room
         execution_timeout=pendulum.duration(minutes=30),
     )
     def ingest() -> dict:

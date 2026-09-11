@@ -4,9 +4,7 @@ sources:
   - name: raw
     database: MARKET_DATA
     schema: RAW
-    description: >
-      Landed from S3 via COPY INTO from external stages. Never
-      transformed in place.
+    description: Loaded from S3 with COPY INTO. Not modified after loading.
 
     tables:
       - name: prices
@@ -14,9 +12,8 @@ sources:
         columns:
           - name: trade_date
             description: >
-              Recovered from the S3 partition path, not the file
-              contents. The ingestion writes date=YYYY-MM-DD/ folders
-              and drops the column from the Parquet itself.
+              Parsed from the S3 path (date=YYYY-MM-DD). The parquet files
+              don't contain it.
             tests:
               - not_null
           - name: ticker
@@ -28,9 +25,8 @@ sources:
 
       - name: fundamentals
         description: >
-          SEC XBRL facts, long format: one row per company per metric
-          per reporting period. Contains multiple dated snapshots, so
-          downstream models must filter to the latest.
+          SEC XBRL facts, one row per company, metric and period. Holds every
+          snapshot, so downstream models filter to the latest.
         columns:
           - name: ticker
             tests:

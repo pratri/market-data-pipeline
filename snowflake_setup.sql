@@ -1,23 +1,16 @@
--- ==========================================================================
 -- Snowflake setup for the market data pipeline.
 --
--- Run these in order. Steps 1-3 first, then update Terraform with the
--- values from step 3, re-apply, then continue from step 4.
---
--- Open a SQL File in Snowsight and paste section by section rather than
--- running the whole file at once; you need to read output partway through.
--- ==========================================================================
+-- Run it section by section in Snowsight, not all at once. After step 3,
+-- copy the DESC INTEGRATION output into terraform.tfvars, re-apply, then
+-- carry on from step 4.
 
 
--- --------------------------------------------------------------------------
 -- 1. Warehouse, database, schemas
--- --------------------------------------------------------------------------
+
 USE ROLE ACCOUNTADMIN;
 
--- XSMALL is the smallest warehouse and plenty for 40k rows. Auto-suspend
--- after 60s of idle is the single most important cost setting on a trial:
--- Snowflake bills per second of warehouse uptime, and a warehouse left
--- running overnight burns credits doing nothing.
+-- XSMALL is plenty. AUTO_SUSPEND = 60 so an idle warehouse doesn't burn
+-- trial credits.
 CREATE WAREHOUSE IF NOT EXISTS MARKET_WH
   WAREHOUSE_SIZE = 'XSMALL'
   AUTO_SUSPEND = 60
@@ -28,9 +21,7 @@ CREATE WAREHOUSE IF NOT EXISTS MARKET_WH
 CREATE DATABASE IF NOT EXISTS MARKET_DATA
   COMMENT = 'Market prices and SEC fundamentals';
 
--- RAW holds data exactly as loaded, untransformed. dbt writes its models
--- into ANALYTICS. Keeping them separate means a bad transformation never
--- destroys the source of truth, and you can always rebuild downstream.
+-- RAW is loaded data, never modified. dbt builds everything else.
 CREATE SCHEMA IF NOT EXISTS MARKET_DATA.RAW
   COMMENT = 'Landing zone, loaded from S3, never transformed in place';
 
@@ -38,27 +29,18 @@ CREATE SCHEMA IF NOT EXISTS MARKET_DATA.ANALYTICS
   COMMENT = 'dbt-managed models';
 
 
--- --------------------------------------------------------------------------
 -- 2. File format
---
--- Parquet carries its own schema, so unlike CSV there's nothing to
--- configure about delimiters or headers.
--- --------------------------------------------------------------------------
+
 CREATE FILE FORMAT IF NOT EXISTS MARKET_DATA.RAW.PARQUET_FORMAT
   TYPE = PARQUET
   COMPRESSION = SNAPPY;
 
 
--- --------------------------------------------------------------------------
 -- 3. Storage integration
 --
--- Replace <ROLE_ARN> with the `snowflake_role_arn` output from Terraform.
--- Replace <BUCKET> with your bucket name.
---
--- STORAGE_ALLOWED_LOCATIONS restricts this integration to one prefix.
--- Even if the IAM role were over-permissive, Snowflake won't read outside
--- the paths listed here. Defence in depth.
--- --------------------------------------------------------------------------
+-- Role ARN comes from `terraform output snowflake_role_arn`.
+-- STORAGE_ALLOWED_LOCATIONS keeps Snowflake to the raw/ prefix.
+
 CREATE STORAGE INTEGRATION IF NOT EXISTS S3_MARKET_INT
   CREATE STORAGE INTEGRATION IF NOT EXISTS S3_MARKET_INT
   TYPE = EXTERNAL_STAGE
@@ -67,22 +49,14 @@ CREATE STORAGE INTEGRATION IF NOT EXISTS S3_MARKET_INT
   STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::742031403615:role/market-data-pipeline-snowflake-role'
   STORAGE_ALLOWED_LOCATIONS = ('s3://market-data-pipeline-raw-66c79357/raw/');
 
--- Run this and copy the two values out. They're what AWS needs in the
--- role's trust policy.
---
---   STORAGE_AWS_IAM_USER_ARN   -> snowflake_iam_user_arn in tfvars
---   STORAGE_AWS_EXTERNAL_ID    -> snowflake_external_id in tfvars
---
--- STOP HERE. Update terraform.tfvars, run terraform apply, then continue.
+-- Copy STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID into
+-- terraform.tfvars (snowflake_iam_user_arn, snowflake_external_id), run
+-- terraform apply, then continue.
 DESC INTEGRATION S3_MARKET_INT;
 
 
--- --------------------------------------------------------------------------
--- 4. External stages  (only after the Terraform re-apply)
---
--- A stage is a named pointer to a location, so queries reference
--- @STAGE_NAME instead of repeating bucket paths and credentials.
--- --------------------------------------------------------------------------
+-- 4. External stages (after the second terraform apply)
+
 USE DATABASE MARKET_DATA;
 USE SCHEMA RAW;
 
@@ -96,23 +70,16 @@ CREATE STAGE IF NOT EXISTS FUNDAMENTALS_STAGE
   URL = 's3://<BUCKET>/raw/fundamentals/'
   FILE_FORMAT = MARKET_DATA.RAW.PARQUET_FORMAT;
 
--- Verify the whole chain: IAM trust policy, integration, stage.
--- If this lists files, the cross-account access works. If it errors,
--- the trust policy is wrong and no amount of COPY INTO tuning will help.
+-- If these list files, the trust policy, integration and stages all work.
 LIST @PRICES_STAGE;
 LIST @FUNDAMENTALS_STAGE;
 
 
--- --------------------------------------------------------------------------
 -- 5. Target tables
 --
--- Loaded columns are explicit rather than using a VARIANT blob. Typed
--- columns give you real constraints and much better query performance.
---
--- The date column is populated from the S3 path, not from file contents:
--- the ingestion writes date=YYYY-MM-DD/ partitions and drops the column
--- from the file itself, so it has to be recovered from METADATA$FILENAME.
--- --------------------------------------------------------------------------
+-- trade_date comes from the S3 path (date=YYYY-MM-DD) since the price
+-- files don't contain it.
+
 CREATE TABLE IF NOT EXISTS MARKET_DATA.RAW.PRICES (
   trade_date    DATE,
   ticker        VARCHAR(16),
@@ -145,20 +112,11 @@ CREATE TABLE IF NOT EXISTS MARKET_DATA.RAW.FUNDAMENTALS (
 );
 
 
--- --------------------------------------------------------------------------
 -- 6. Load prices
 --
--- $1 is the whole Parquet record as a VARIANT; :fieldname pulls a column.
--- Casts are explicit because Parquet's types don't always map to what
--- you want in the table.
---
--- REGEXP_SUBSTR recovers the partition date from the file path. This is
--- exactly what Hive-style partitioning buys: the value lives in the path
--- so it isn't duplicated in every row of the file.
---
--- COPY INTO is idempotent by default: Snowflake tracks which files it has
--- already loaded and skips them. Re-running is safe and won't duplicate.
--- --------------------------------------------------------------------------
+-- COPY INTO skips files it has already loaded. A file overwritten in S3
+-- has a new checksum though, so it loads again.
+
 COPY INTO MARKET_DATA.RAW.PRICES (
   trade_date, ticker, open, high, low, close, adj_close, volume, source_file
 )
@@ -179,13 +137,10 @@ FILE_FORMAT = (FORMAT_NAME = MARKET_DATA.RAW.PARQUET_FORMAT)
 ON_ERROR = 'ABORT_STATEMENT';
 
 
--- --------------------------------------------------------------------------
 -- 7. Load fundamentals
 --
--- period_start is null for balance-sheet metrics (total assets, shares
--- outstanding) because those are point-in-time values, not periods.
--- TRY_TO_DATE returns null instead of erroring on those.
--- --------------------------------------------------------------------------
+-- period_start is empty for point-in-time values, TRY_TO_DATE leaves those null.
+
 COPY INTO MARKET_DATA.RAW.FUNDAMENTALS (
   ticker, cik, metric, tag, unit, period_start, period_end,
   value, fiscal_year, fiscal_period, form, filed, accession, source_file
@@ -212,9 +167,8 @@ FILE_FORMAT = (FORMAT_NAME = MARKET_DATA.RAW.PARQUET_FORMAT)
 ON_ERROR = 'ABORT_STATEMENT';
 
 
--- --------------------------------------------------------------------------
 -- 8. Verify
--- --------------------------------------------------------------------------
+
 SELECT COUNT(*) AS row_count,
        COUNT(DISTINCT ticker) AS tickers,
        MIN(trade_date) AS earliest,
@@ -226,8 +180,7 @@ SELECT COUNT(*) AS row_count,
        COUNT(DISTINCT metric) AS metrics
 FROM MARKET_DATA.RAW.FUNDAMENTALS;
 
--- Sanity check that partition-date extraction worked. If trade_date is
--- null anywhere, the regex didn't match the file paths.
+-- nulls here mean the path regex didn't match
 SELECT COUNT(*) AS null_dates
 FROM MARKET_DATA.RAW.PRICES
 WHERE trade_date IS NULL;

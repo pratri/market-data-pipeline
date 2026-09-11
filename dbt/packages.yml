@@ -1,6 +1,4 @@
 packages:
-  # dbt_utils supplies tests the core package doesn't have, notably
-  # unique_combination_of_columns (for asserting a model's grain) and
-  # accepted_range. Both are used in the staging tests.
+  # for unique_combination_of_columns and accepted_range
   - package: dbt-labs/dbt_utils
     version: [">=1.1.0", "<2.0.0"]

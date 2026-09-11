@@ -1,13 +1,10 @@
-# ---------------------------------------------------------------------------
 # EC2 host for Airflow.
-# ---------------------------------------------------------------------------
 
-# Look up the current Ubuntu 22.04 AMI rather than hardcoding an ID.
-# AMI IDs differ per region and change whenever Canonical publishes a new
-# image, so a hardcoded one rots and breaks anyone else running this.
+# Latest Ubuntu 22.04 AMI instead of a hardcoded ID, since IDs differ per
+# region and go stale.
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical's official AWS account ID
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
@@ -24,8 +21,7 @@ resource "aws_security_group" "airflow" {
   name        = "${var.project_name}-airflow-sg"
   description = "SSH and Airflow UI, restricted to a single source IP"
 
-  # SSH. Locked to your IP only. Port 22 open to 0.0.0.0/0 gets scanned
-  # and brute-forced within hours of an instance coming up.
+  # SSH from my IP only
   ingress {
     description = "SSH from my IP"
     from_port   = 22
@@ -34,8 +30,7 @@ resource "aws_security_group" "airflow" {
     cidr_blocks = [var.my_ip_cidr]
   }
 
-  # Airflow web UI. Also locked down: the default install has weak auth
-  # and exposing it publicly is a real compromise vector.
+  # Airflow UI, also my IP only (default auth is weak)
   ingress {
     description = "Airflow UI from my IP"
     from_port   = 8080
@@ -44,8 +39,7 @@ resource "aws_security_group" "airflow" {
     cidr_blocks = [var.my_ip_cidr]
   }
 
-  # Unrestricted egress. The instance needs to reach Yahoo, SEC, Docker Hub,
-  # Snowflake, and apt repositories.
+  # needs Yahoo, SEC, Docker Hub, Snowflake and apt
   egress {
     description = "All outbound"
     from_port   = 0
@@ -73,8 +67,7 @@ resource "aws_instance" "airflow" {
     delete_on_termination = true
   }
 
-  # Bootstrap script, runs once on first boot as root.
-  # Installs Docker and Compose so the box is ready for Airflow.
+  # first boot: install Docker and Compose
   user_data = <<-EOF
     #!/bin/bash
     set -euxo pipefail
@@ -95,14 +88,13 @@ resource "aws_instance" "airflow" {
     apt-get install -y docker-ce docker-ce-cli containerd.io \
       docker-buildx-plugin docker-compose-plugin
 
-    # Let the default ubuntu user run docker without sudo.
+    # let ubuntu run docker without sudo
     usermod -aG docker ubuntu
 
     systemctl enable docker
     systemctl start docker
 
-    # t3.small has 2 GB RAM. Airflow's scheduler and webserver together can
-    # spike past that and get OOM-killed. Swap absorbs the spikes.
+    # t3.small only has 2GB, swap keeps Airflow from getting OOM-killed
     fallocate -l 2G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile
@@ -110,9 +102,7 @@ resource "aws_instance" "airflow" {
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
   EOF
 
-  # Changing user_data would otherwise destroy and recreate the instance.
-  # Once Airflow is set up on the box you don't want that happening by
-  # accident. Comment this out if you're still iterating on the bootstrap.
+  # don't recreate the instance when user_data changes
   lifecycle {
     ignore_changes = [user_data]
   }

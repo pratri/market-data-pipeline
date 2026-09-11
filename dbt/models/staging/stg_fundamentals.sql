@@ -1,18 +1,8 @@
--- Staging over raw fundamentals. Two things happen here that aren't
--- cosmetic, so they're worth explaining.
+-- Latest fundamentals snapshot, with each fact labelled by period length.
 --
--- 1. LATEST SNAPSHOT ONLY. The ingestion writes a dated snapshot on
---    every run, so raw holds several full copies of SEC's data as it
---    stood on different days. That history is deliberate and useful,
---    but current-value models must read one snapshot or every figure
---    multiplies.
---
--- 2. PERIOD LENGTH. SEC reports the same metric over different
---    durations that share an end date: Q2 alone (Apr-Jun) and the
---    half-year (Jan-Jun) both end 30 June. Joining on end date without
---    accounting for duration double-counts revenue. Classifying the
---    period here means downstream models filter on an explicit label
---    instead of rediscovering the trap.
+-- Raw keeps every weekly snapshot, so only the newest is used here.
+-- Period length matters because Q2 (Apr-Jun) and H1 (Jan-Jun) share an
+-- end date, and grouping on end date alone double counts.
 
 with source as (
 
@@ -22,9 +12,7 @@ with source as (
 
 latest_snapshot as (
 
-    -- The snapshot date is encoded in the S3 path
-    -- (raw/fundamentals/snapshot_date=YYYY-MM-DD/), so it's recovered
-    -- from source_file rather than stored as a column.
+    -- snapshot date only lives in the S3 path (snapshot_date=YYYY-MM-DD)
     select
         max(
             regexp_substr(
@@ -66,8 +54,7 @@ classified as (
         form,
         filed,
 
-        -- Null start means a point-in-time balance (total assets,
-        -- shares outstanding) rather than a flow measured over a span.
+        -- null start = point-in-time value (assets, shares), not a flow
         case
             when period_start is null then null
             else datediff('day', period_start, period_end)

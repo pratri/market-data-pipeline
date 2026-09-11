@@ -1,14 +1,9 @@
 """
-Daily OHLCV ingestion.
+Daily price ingestion.
 
-Runs on weekday mornings, pulls a short trailing window, and skips dates
-already in S3. The trailing window rather than "just yesterday" covers
-the case where a previous run failed: the next run backfills the gap
-without anyone intervening.
-
-Schedule is 6am Eastern on weekdays. Markets close at 4pm ET and Yahoo
-settles the day's data overnight, so a morning run gets a complete
-previous session.
+Runs 6am ET on weekdays, after Yahoo has settled the previous session.
+Pulls the last 10 days and skips dates already in S3, so if a run fails
+the next one fills the gap.
 """
 
 from __future__ import annotations
@@ -16,19 +11,17 @@ from __future__ import annotations
 import pendulum
 from airflow.sdk import dag, task
 
-# Ten days of lookback. Long enough to cover a long weekend plus a few
-# failed runs; short enough that the request stays cheap. The skip
-# logic means re-fetched dates cost nothing beyond the download.
+# covers a long weekend plus a couple of failed runs
 LOOKBACK_DAYS = 10
 
 
 @dag(
     dag_id="ingest_prices_daily",
     description="Pull daily OHLCV from Yahoo and land partitioned Parquet in S3",
-    schedule="0 6 * * 1-5",              # 6am, Mon-Fri
+    schedule="0 6 * * 1-5",              # 6am Mon-Fri
     start_date=pendulum.datetime(2026, 1, 1, tz="America/New_York"),
-    catchup=False,                        # don't backfill every day since start_date
-    max_active_runs=1,                    # never let two runs write the same keys
+    catchup=False,                        # no backfill from start_date
+    max_active_runs=1,                    # two runs shouldn't write the same keys
     default_args={
         "retries": 3,
         "retry_delay": pendulum.duration(minutes=5),
@@ -43,9 +36,8 @@ def ingest_prices_daily():
     def ingest() -> dict:
         """Fetch recent prices and write any dates not already in S3.
 
-        Imports happen inside the task rather than at module level.
-        Airflow parses every DAG file on a loop, and a heavy import at
-        module scope runs on every parse, slowing the whole scheduler.
+        Imports are inside the task so the scheduler doesn't run them on
+        every DAG parse.
         """
         import sys
 

@@ -3,10 +3,8 @@ version: 2
 models:
   - name: fct_daily_metrics
     description: >
-      Daily fact table joining prices to the most recent fundamentals
-      publicly available as of that trading day. Fundamentals attach by
-      FILING date rather than period end, so no row contains information
-      that wasn't public on its trade_date.
+      Daily prices joined to the latest fundamentals filed on or before each
+      trade date. Joins on filing date, not period end.
     columns:
       - name: trade_date
         tests: [not_null]
@@ -25,25 +23,19 @@ models:
               min_value: 0
               inclusive: false
       - name: days_since_filing
-        description: >
-          Trading day minus filing date. Never negative; a negative
-          value would mean fundamentals were attached before they were
-          public, which is lookahead bias.
+        description: Trade date minus filing date. Negative would mean lookahead.
         tests:
           - dbt_utils.accepted_range:
               min_value: 0
               inclusive: true
       - name: pe_ratio
         description: >
-          Market cap over TTM net income. Null where earnings are
-          negative or fewer than four quarters are available: a negative
-          P/E is meaningless and poisons cross-sectional averages.
+          Market cap over TTM net income. Null for negative earnings or fewer
+          than 4 quarters.
       - name: price_to_sales
         description: >
-          Null for Financials by design. Banks do not report a revenue
-          figure comparable to an operating company's, so P/S would look
-          valid and mean nothing. Price-to-book is the appropriate ratio
-          for those companies and is populated.
+          Null for Financials on purpose, since bank revenue isn't comparable.
+          Use price_to_book for those.
       - name: market_cap
         tests:
           - dbt_utils.accepted_range:
@@ -56,9 +48,7 @@ models:
           combination_of_columns: [trade_date, ticker]
 
   - name: dim_companies
-    description: >
-      One row per company with sector, identifiers, latest reported
-      figures, and flags describing data-quality limitations.
+    description: One row per company with sector, latest figures and data quality flags.
     columns:
       - name: ticker
         tests:
@@ -81,17 +71,8 @@ models:
                 - Energy
                 - Unclassified
       - name: revenue_metric_applicable
-        description: >
-          False for Financials. Banks report interest and non-interest
-          income rather than revenue, so revenue-based ratios are
-          suppressed rather than computed from an incomparable figure.
+        description: False for Financials, where revenue ratios are suppressed.
       - name: insufficient_revenue_history
-        description: >
-          True where fewer than four quarters of revenue exist,
-          regardless of sector. Catches gaps the hardcoded sector
-          mapping wouldn't.
+        description: True when a company has fewer than 4 quarters of revenue.
       - name: has_stale_fundamentals
-        description: >
-          True where the most recent filing is over six months old.
-          Expected for at least one ticker whose current CIK is a
-          recently registered entity following a reorganization.
+        description: True when the latest quarter ended more than 6 months ago.

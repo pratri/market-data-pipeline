@@ -1,23 +1,10 @@
--- One row per company: identifiers, sector, and a snapshot of the most
--- recent reported figures.
+-- One row per company: sector, identifiers and latest reported figures.
 --
--- The revenue_metric_applicable flag exists because of a real finding,
--- not a convenience. Goldman Sachs has zero revenue rows across 78
--- quarters; Morgan Stanley has one. That isn't a tag-list gap, it's
--- that banks don't report "revenue" as a concept. They report interest
--- income, non-interest income, and revenues net of interest expense,
--- which measure something structurally different from a retailer's
--- product sales.
---
--- The wrong fix is adding bank tags so the column fills up: you'd get a
--- price-to-sales ratio for Goldman that looks valid and is meaningless,
--- because it isn't comparable to the same ratio for Costco. Analysts
--- don't value banks on P/S; they use price-to-book, which this model
--- computes and which works correctly for financials.
---
--- So the flag is set explicitly and revenue-based ratios are suppressed
--- for these companies. A visible null with a documented reason beats an
--- invisible wrong number.
+-- revenue_metric_applicable is there because banks don't report revenue
+-- like everyone else. GS has zero revenue rows across 78 quarters, MS has
+-- one. Adding bank tags would just produce a P/S for Goldman that can't be
+-- compared to Costco's, so revenue ratios are nulled for Financials and
+-- P/B is the ratio to use there.
 
 with fundamentals as (
 
@@ -31,11 +18,8 @@ prices as (
 
 ),
 
--- Hardcoded sector mapping. A production system would source this from
--- a reference dataset (GICS, or SEC's own SIC codes, which are in the
--- submissions endpoint). Hardcoding a fixed 64-ticker universe is
--- honest about scope rather than pretending to a classification
--- pipeline that doesn't exist here.
+-- Hardcoded for a fixed 64-ticker list. SIC codes from SEC's submissions
+-- endpoint would be the proper source.
 sectors as (
 
     select column1 as ticker, column2 as sector
@@ -98,8 +82,7 @@ latest_fundamentals as (
 
 ),
 
--- Actual coverage per company, so the flag reflects the data rather
--- than only the sector assumption.
+-- actual revenue coverage per company
 revenue_coverage as (
 
     select
@@ -166,24 +149,17 @@ select
     rc.quarters_with_revenue,
     rc.quarters_derived,
 
-    -- Sector-based: banks and capital-markets firms don't report a
-    -- comparable revenue figure under US-GAAP XBRL.
+    -- sector based: no comparable revenue for Financials
     case when coalesce(s.sector, '') = 'Financials' then false else true end
         as revenue_metric_applicable,
 
-    -- Coverage-based: catches any other company whose revenue is too
-    -- sparse to compute a trailing-twelve-month figure, regardless of
-    -- sector. Belt and braces against the hardcoded mapping being
-    -- incomplete.
+    -- coverage based: under 4 quarters of revenue means no TTM, whatever
+    -- the sector
     case
         when rc.quarters_with_revenue < 4 then true else false
     end as insufficient_revenue_history,
 
-    -- Flags a company whose SEC filing history is unusually short. XOM
-    -- is one: its current CIK is a recently registered entity following
-    -- a corporate reorganization, so filings only reach back to 2024.
-    -- Surfacing it as a column beats discovering it later as a
-    -- mysterious gap.
+    -- latest quarter ended more than 6 months ago
     case
         when f.latest_period_end < dateadd('month', -6, current_date())
         then true else false

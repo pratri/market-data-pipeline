@@ -1,34 +1,17 @@
--- Pivots fundamentals into one row per company-quarter.
+-- One row per company per quarter.
 --
--- Three problems handled here, all found by auditing output rather
--- than assuming SEC's tags behave uniformly across filers.
---
--- 1. DOUBLE COUNTING. Flow metrics are reported over overlapping
---    durations sharing an end date: Q2 alone (Apr-Jun) and the
---    half-year (Jan-Jun) both end 30 June. Summing without regard to
---    duration roughly doubles revenue.
---
--- 2. CUMULATIVE REPORTING. Many filers never report a standalone Q2,
---    Q3 or Q4. They report Q1, then year-to-date H1, 9M and FY. Taking
---    only period_type='quarterly' discards most of their history: ABBV
---    kept 6 of 20 revenue rows, KO 26 of 53. Discrete quarters are
---    derived by differencing consecutive cumulative figures
---    (Q2 = H1 - Q1, Q3 = 9M - H1, Q4 = FY - 9M).
---
---    A cumulative series is identified as any (ticker, metric,
---    period_start) group with more than one row. That works for
---    non-calendar fiscal years too (AVGO ends November, INTU July,
---    DIS September), which a DATE_TRUNC-on-calendar-year approach
---    would silently mishandle.
---
--- 3. SHARES OUTSTANDING SPANS TWO SHAPES. About half the universe
---    reports CommonStockSharesOutstanding, a point-in-time balance
---    ('instant'). The rest report
---    WeightedAverageNumberOfDilutedSharesOutstanding, an average over
---    the period, which carries a period_start and lands in
---    'quarterly'. Accepting only the instant form left half the
---    universe with no share count, hence no market cap and no
---    valuation ratios at all.
+-- Everything below was found by checking actual output values:
+--   1. Q2 and H1 share an end date, so flows are split by period length
+--      or revenue gets double counted.
+--   2. Lots of filers only report YTD (Q1, H1, 9M, FY). Standalone
+--      quarters are derived by differencing: Q2 = H1 - Q1, Q3 = 9M - H1,
+--      Q4 = FY - 9M. Using reported quarters only, ABBV kept 6 of 20
+--      revenue rows and KO 26 of 53.
+--   3. About half the universe reports point-in-time shares outstanding,
+--      the other half only weighted average diluted shares. Both are used,
+--      otherwise half the companies get no market cap.
+--   4. Some tickers have gaps in their filing history, so growth checks
+--      the real dates instead of trusting lag(x, 4).
 
 with fundamentals as (
 
@@ -52,8 +35,8 @@ flow_metrics as (
 
 ),
 
--- Flow values already reported as a standalone quarter. Preferred over
--- anything derived: it's what the company actually stated.
+-- Standalone quarters as the company reported them. These win over
+-- derived values.
 flows_as_reported as (
 
     select
@@ -65,20 +48,13 @@ flows_as_reported as (
 
 ),
 
--- Cumulative series: consecutive rows sharing a period_start.
--- A cumulative series is consecutive rows sharing a period_start AND a
--- tag.
+-- A YTD series is rows sharing period_start and tag. Keying on
+-- period_start handles odd fiscal years (AVGO ends Nov, INTU Jul, DIS Sep).
 --
--- Partitioning by tag matters. Companies switch XBRL tags mid-year, so
--- a single fiscal year's series can span two of them: MA reported Q1
--- through Q3 2021 under Revenues and the full year under
--- SalesRevenueNet, which is a narrower concept. Differencing across
--- that boundary subtracted an 11.1bn annual figure from a 13.7bn
--- nine-month figure and produced -2.589bn of "Q4 revenue". Twenty-odd
--- companies had a mixed-tag series, so this wasn't a one-off.
---
--- Confining each series to one tag means a transition year loses its
--- derived quarters rather than inventing wrong ones.
+-- Tag is in the key because companies switch tags mid-year. MA reported
+-- Q1-Q3 2021 as Revenues and FY as SalesRevenueNet, and differencing
+-- across the two gave -2.589bn of Q4 revenue. About twenty companies had
+-- a mixed-tag year. Now a switch year just loses its derived quarters.
 cumulative_series as (
 
     select
@@ -95,7 +71,12 @@ cumulative_series as (
         lag(period_end) over (
             partition by ticker, metric, period_start, tag
             order by period_end
-        ) as prev_period_end
+        ) as prev_period_end,
+
+        lag(filed) over (
+            partition by ticker, metric, period_start, tag
+            order by period_end
+        ) as prev_filed
 
     from flow_metrics
 
@@ -113,19 +94,19 @@ flows_derived as (
     where rows_in_series > 1
       and prev_cumulative_value is not null
 
-      -- Guard: the gap between consecutive cumulative points should be
-      -- about one quarter. A wider gap means the series skipped a
-      -- filing, and differencing across it would produce a half-year
-      -- figure masquerading as a quarter.
+      -- YTD points should be one quarter apart, otherwise the difference
+      -- covers more than a quarter
       and datediff('day', prev_period_end, period_end) between 80 and 100
 
-      -- Safety net. Partitioning by tag should already prevent a
-      -- subtraction across two different revenue concepts, but a
-      -- restated cumulative figure can also come in lower than the
-      -- prior period and yield a negative quarter. Revenue, operating
-      -- income and cash flow can legitimately be negative in a bad
-      -- quarter, so this only rejects revenue, where a negative value
-      -- is definitionally impossible.
+      -- Both points should also be filed close together. IBM's 9M 2020
+      -- ($53.3bn) and FY 2020 ($55.2bn) were filed 15 months apart, with
+      -- the FY restated after the Kyndryl spinoff, and the difference came
+      -- out as $1.9bn of Q4 revenue against a real ~$20bn.
+      and datediff('day', prev_filed, filed) between 0 and 200
+
+      -- A restated YTD number can still come in below the previous one.
+      -- Revenue can't be negative so those get dropped. Operating income
+      -- and cash flow can go negative, so they're left alone.
       and not (metric = 'revenue' and value - prev_cumulative_value < 0)
 
 ),
@@ -138,7 +119,7 @@ flows_combined as (
 
 ),
 
--- Where both exist for the same quarter, keep the as-reported value.
+-- as-reported beats derived when both exist
 flows_deduped as (
 
     select
@@ -157,7 +138,7 @@ flows_deduped as (
 
 ),
 
--- Balance-sheet metrics: point-in-time, no differencing applies.
+-- balance sheet items, nothing to difference
 stocks as (
 
     select
@@ -186,10 +167,8 @@ shares_instant as (
 
 ),
 
--- Fallback form: an average over the quarter rather than a count at a
--- moment, so market cap derived from it is approximate. Materially
--- better than nulls, and the gap is small absent heavy buybacks or
--- issuance mid-period.
+-- Fallback: average shares over the quarter. Market cap from this is
+-- approximate, but close unless there were big buybacks or issuance.
 shares_weighted as (
 
     select
@@ -211,7 +190,17 @@ shares_combined as (
         coalesce(i.fiscal_year, w.fiscal_year)     as fiscal_year,
         coalesce(i.fiscal_period, w.fiscal_period) as fiscal_period,
         'shares_outstanding'                       as metric,
-        coalesce(i.shares_value, w.shares_value)   as value,
+
+        -- MCD files weighted average diluted shares in millions (711.1)
+        -- where everyone else uses units, which made its market cap
+        -- $184,622. Under 1M gets nulled rather than rescaled, since
+        -- guessing a scale factor from size will break eventually.
+        -- Nothing in this universe has fewer than 1M shares.
+        case
+            when coalesce(i.shares_value, w.shares_value) >= 1000000
+            then coalesce(i.shares_value, w.shares_value)
+        end as value,
+
         case
             when i.shares_value is not null then 'instant'
             else 'weighted_average'
@@ -253,9 +242,8 @@ pivoted as (
         cik,
         period_end,
 
-        -- A quarter's metrics can arrive across several filings; the
-        -- latest is when the full picture became public, which is what
-        -- the downstream as-of join keys on.
+        -- a quarter's metrics can come from several filings, the downstream
+        -- as-of join uses the latest one
         max(filed) as filed_date,
 
         max(fiscal_year)   as fiscal_year,
@@ -282,23 +270,13 @@ pivoted as (
 
 -- Carry the last known share count forward.
 --
--- Most companies report CommonStockSharesOutstanding only in their
--- annual filing and omit it from quarterlies. NVDA reports it at its
--- January fiscal year end and nowhere else; IBM in December; DIS in
--- September. That left 12 of 64 companies with no share count on the
--- most recent quarter, and with no shares there's no market cap, so no
--- price-to-book, no P/E and no price-to-sales.
+-- A lot of companies only report shares outstanding in the 10-K (NVDA in
+-- January, IBM December, DIS September). That left 12 of 64 with no share
+-- count on their latest quarter, so no market cap and no ratios.
 --
--- Share counts don't disappear between filings, so the last known value
--- is a reasonable stand-in. It is a stand-in though: NVDA went from
--- 24,477M to 24,304M over a year, so a carried-forward count can be
--- stale by up to three quarters and off by a percent or so from
--- buybacks. shares_basis records which rows are carried forward so
--- consumers can exclude them if that matters.
---
--- Deliberately forward only. Filling backward would attribute a share
--- count to periods before the company reported one, which is the same
--- lookahead problem the filing-date join exists to avoid.
+-- The fill has no age limit: carried values average 789 days old, worst
+-- case 949. shares_basis marks them so they can be filtered out.
+-- Forward only, since filling backward would be lookahead.
 shares_filled as (
 
     select
@@ -327,16 +305,26 @@ shares_filled as (
 
 ),
 
+-- lag(x, 4) is four rows back, which is only four quarters when there are
+-- no gaps. The lagged period_end comes along so the final select can check
+-- the real distance.
 with_growth as (
 
     select
         *,
+
         lag(revenue) over (partition by ticker order by period_end)
             as prev_quarter_revenue,
+        lag(period_end) over (partition by ticker order by period_end)
+            as prev_quarter_period_end,
+
         lag(revenue, 4) over (partition by ticker order by period_end)
             as year_ago_revenue,
         lag(net_income, 4) over (partition by ticker order by period_end)
-            as year_ago_net_income
+            as year_ago_net_income,
+        lag(period_end, 4) over (partition by ticker order by period_end)
+            as year_ago_period_end
+
     from shares_filled
 
 )
@@ -361,20 +349,28 @@ select
     shares_outstanding,
     cash_and_equivalents,
 
-    -- nullif guards divide-by-zero: a company with zero prior revenue
-    -- would otherwise fail the model rather than nulling one row.
+    -- QoQ: previous row has to be about one quarter back (same 80-100 days
+    -- as the YTD differencing)
     case
-        when prev_quarter_revenue is not null and prev_quarter_revenue != 0
+        when prev_quarter_revenue is not null
+         and prev_quarter_revenue != 0
+         and datediff('day', prev_quarter_period_end, period_end) between 80 and 100
         then (revenue - prev_quarter_revenue) / abs(nullif(prev_quarter_revenue, 0))
     end as revenue_qoq_growth,
 
+    -- YoY: 330-400 days leaves room for 52/53 week years but rules out the
+    -- multi-year gaps that gave COP 2,825% growth
     case
-        when year_ago_revenue is not null and year_ago_revenue != 0
+        when year_ago_revenue is not null
+         and year_ago_revenue != 0
+         and datediff('day', year_ago_period_end, period_end) between 330 and 400
         then (revenue - year_ago_revenue) / abs(nullif(year_ago_revenue, 0))
     end as revenue_yoy_growth,
 
     case
-        when year_ago_net_income is not null and year_ago_net_income != 0
+        when year_ago_net_income is not null
+         and year_ago_net_income != 0
+         and datediff('day', year_ago_period_end, period_end) between 330 and 400
         then (net_income - year_ago_net_income) / abs(nullif(year_ago_net_income, 0))
     end as net_income_yoy_growth,
 
