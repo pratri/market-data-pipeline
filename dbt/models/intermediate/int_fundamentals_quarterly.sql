@@ -40,7 +40,7 @@ flow_metrics as (
 
     select
         ticker, cik, period_start, period_end, period_type,
-        filed, fiscal_year, fiscal_period, metric, value
+        filed, fiscal_year, fiscal_period, metric, tag, value
     from fundamentals
     where metric in (
         'revenue',
@@ -66,21 +66,34 @@ flows_as_reported as (
 ),
 
 -- Cumulative series: consecutive rows sharing a period_start.
+-- A cumulative series is consecutive rows sharing a period_start AND a
+-- tag.
+--
+-- Partitioning by tag matters. Companies switch XBRL tags mid-year, so
+-- a single fiscal year's series can span two of them: MA reported Q1
+-- through Q3 2021 under Revenues and the full year under
+-- SalesRevenueNet, which is a narrower concept. Differencing across
+-- that boundary subtracted an 11.1bn annual figure from a 13.7bn
+-- nine-month figure and produced -2.589bn of "Q4 revenue". Twenty-odd
+-- companies had a mixed-tag series, so this wasn't a one-off.
+--
+-- Confining each series to one tag means a transition year loses its
+-- derived quarters rather than inventing wrong ones.
 cumulative_series as (
 
     select
         *,
         count(*) over (
-            partition by ticker, metric, period_start
+            partition by ticker, metric, period_start, tag
         ) as rows_in_series,
 
         lag(value) over (
-            partition by ticker, metric, period_start
+            partition by ticker, metric, period_start, tag
             order by period_end
         ) as prev_cumulative_value,
 
         lag(period_end) over (
-            partition by ticker, metric, period_start
+            partition by ticker, metric, period_start, tag
             order by period_end
         ) as prev_period_end
 
@@ -105,6 +118,15 @@ flows_derived as (
       -- filing, and differencing across it would produce a half-year
       -- figure masquerading as a quarter.
       and datediff('day', prev_period_end, period_end) between 80 and 100
+
+      -- Safety net. Partitioning by tag should already prevent a
+      -- subtraction across two different revenue concepts, but a
+      -- restated cumulative figure can also come in lower than the
+      -- prior period and yield a negative quarter. Revenue, operating
+      -- income and cash flow can legitimately be negative in a bad
+      -- quarter, so this only rejects revenue, where a negative value
+      -- is definitionally impossible.
+      and not (metric = 'revenue' and value - prev_cumulative_value < 0)
 
 ),
 

@@ -88,15 +88,57 @@ The tests all passed on a version of this where 98% of the valuation
 ratios were null. Tests check what you thought to check. These came from
 querying the output and noticing the numbers were wrong.
 
+**Companies switch XBRL tags mid-history.** This one was invisible until
+I checked coverage by year. NVDA reported revenue under
+`RevenueFromContractWithCustomerExcludingAssessedTax` until January 2022
+— 28 entries — and has used `Revenues` ever since, 280 entries. Both
+tags were in my priority list, but my extraction returned on the first
+tag that had *any* data. So NVDA got 28 rows ending in 2022 and nothing
+after, which meant no net margin and no price-to-sales for four years of
+the fact table.
+
+Same bug in mirror image for CAT, which had revenue but no net income,
+and for PFE, GOOGL, CVS and GE. Six major companies with silent holes,
+and every test passing the whole time.
+
+The fix reads every candidate tag and merges them, deduplicating on
+period and resolving overlaps to the higher-priority tag. That took
+revenue coverage from 12,674 rows to 14,721, and price-to-sales from
+8,237 to 12,364.
+
+**Share counts are only reported annually.** Most filers include
+`CommonStockSharesOutstanding` in their 10-K and omit it from
+quarterlies — NVDA reports it at its January fiscal year end and nowhere
+else. That left 12 of 64 companies with no share count on the most
+recent quarter, and no shares means no market cap, so no P/E, no
+price-to-book, no price-to-sales. Carrying the last known count forward
+fixes it, with `shares_basis` marking which rows are carried forward.
+The fill is unbounded, and in practice a carried-forward count averages
+789 days stale and reaches 949 at worst, so market caps built on those
+rows are approximations rather than facts.
+
+**Differencing across a tag switch produced negative revenue.** Once I
+merged tags, a company's cumulative series for one fiscal year could
+span two of them. MA reported Q1 through Q3 2021 under `Revenues` and
+the full year under `SalesRevenueNet`, a narrower concept. Subtracting
+the 11.1bn annual figure from the 13.7bn nine-month figure gave -2.589bn
+of "Q4 revenue". Twenty-odd companies had a mixed-tag series, so it
+wasn't a one-off.
+
+Fixed by partitioning the cumulative series by tag as well as period
+start, so differencing stays inside one series. A transition year now
+loses its derived quarters rather than inventing wrong ones. There's a
+test asserting revenue is never negative, since that's a value which
+can't legitimately occur and is a good canary for this class of bug.
+
 **Shares outstanding comes in two shapes.** About half the universe
 reports `CommonStockSharesOutstanding`, a count at a point in time. The
 rest report `WeightedAverageNumberOfDilutedSharesOutstanding`, which is
 an average over the period and therefore carries a start date, so it
 classifies as a duration metric rather than an instant one. My first
-version only took the instant form, which meant half the companies had no
-share count, no market cap, and no valuation ratios. Fixed by accepting
-both and keeping a `shares_basis` column so you can tell which one a row
-used.
+version only took the instant form, which meant half the companies had
+no share count at all. Fixed by accepting both and keeping a
+`shares_basis` column so you can tell which one a row used.
 
 **Banks don't report revenue.** Goldman Sachs has zero revenue rows
 across 78 quarters. Morgan Stanley has one. That isn't a gap in my tag

@@ -17,6 +17,18 @@ models:
       - name: filed_date
         description: Latest filing date across the metrics in this quarter.
         tests: [not_null]
+      - name: revenue
+        description: >
+          Quarterly revenue. Never negative — a negative value would mean
+          the cumulative differencing subtracted across two different
+          XBRL revenue concepts, which is what happened before the
+          series was partitioned by tag.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: true
+              config:
+                where: "revenue is not null"
       - name: revenue_source
         description: >
           'as_reported' where the company stated a standalone quarterly
@@ -33,10 +45,9 @@ models:
           count, the most accurate. 'weighted_average' is an average
           over the quarter, so market cap built from it is approximate.
           'carried_forward' means the company didn't report a count that
-          quarter and the last known value was carried forward — most
-          filers only report shares in their annual filing, so this
-          covers roughly three quarters in four and can be stale by up
-          to a year.
+          quarter and the last known value was carried forward. Most
+          filers only report shares annually, and the fill is unbounded,
+          so a carried-forward count can be over two years stale.
         tests:
           - accepted_values:
               values: ['instant', 'weighted_average', 'carried_forward']
