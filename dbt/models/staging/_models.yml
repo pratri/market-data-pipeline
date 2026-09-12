@@ -15,14 +15,16 @@ models:
           - not_null
           # a close of 0 or less is bad data
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: false
+              arguments:
+                min_value: 0
+                inclusive: false
     tests:
       # one row per ticker per day
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - trade_date
-            - ticker
+          arguments:
+            combination_of_columns:
+              - trade_date
+              - ticker
 
   - name: stg_fundamentals
     description: Latest SEC snapshot, with each fact labelled by period length.
@@ -40,12 +42,14 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['instant', 'quarterly', 'half_year', 'nine_month', 'annual', 'other']
+              arguments:
+                values: ['instant', 'quarterly', 'half_year', 'nine_month', 'annual', 'other']
     tests:
       # duplicates here mean more than one snapshot got through
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - ticker
-            - metric
-            - period_start
-            - period_end
+          arguments:
+            combination_of_columns:
+              - ticker
+              - metric
+              - period_start
+              - period_end
