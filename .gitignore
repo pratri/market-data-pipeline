@@ -35,5 +35,5 @@ Thumbs.db
 logs/
 airflow.db
 airflow.cfg
-standalone_admin_password.txt.env.airflow
+standalone_admin_password.txt
 .env.airflow

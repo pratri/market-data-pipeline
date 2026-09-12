@@ -94,7 +94,7 @@ resource "aws_instance" "airflow" {
     systemctl enable docker
     systemctl start docker
 
-    # t3.small only has 2GB, swap keeps Airflow from getting OOM-killed
+    # swap as a buffer against memory spikes from Airflow's containers
     fallocate -l 2G /swapfile
     chmod 600 /swapfile
     mkswap /swapfile

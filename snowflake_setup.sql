@@ -42,12 +42,11 @@ CREATE FILE FORMAT IF NOT EXISTS MARKET_DATA.RAW.PARQUET_FORMAT
 -- STORAGE_ALLOWED_LOCATIONS keeps Snowflake to the raw/ prefix.
 
 CREATE STORAGE INTEGRATION IF NOT EXISTS S3_MARKET_INT
-  CREATE STORAGE INTEGRATION IF NOT EXISTS S3_MARKET_INT
   TYPE = EXTERNAL_STAGE
   STORAGE_PROVIDER = 'S3'
   ENABLED = TRUE
-  STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::742031403615:role/market-data-pipeline-snowflake-role'
-  STORAGE_ALLOWED_LOCATIONS = ('s3://market-data-pipeline-raw-66c79357/raw/');
+  STORAGE_AWS_ROLE_ARN = '<ROLE_ARN>'
+  STORAGE_ALLOWED_LOCATIONS = ('s3://<BUCKET>/raw/');
 
 -- Copy STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID into
 -- terraform.tfvars (snowflake_iam_user_arn, snowflake_external_id), run
@@ -78,7 +77,8 @@ LIST @FUNDAMENTALS_STAGE;
 -- 5. Target tables
 --
 -- trade_date comes from the S3 path (date=YYYY-MM-DD) since the price
--- files don't contain it.
+-- files don't contain it. fetched_at matters: Yahoo split-adjusts as of
+-- the download, and dbt uses it to recover the as-traded price.
 
 CREATE TABLE IF NOT EXISTS MARKET_DATA.RAW.PRICES (
   trade_date    DATE,
@@ -89,6 +89,9 @@ CREATE TABLE IF NOT EXISTS MARKET_DATA.RAW.PRICES (
   close         FLOAT,
   adj_close     FLOAT,
   volume        FLOAT,
+  dividends     FLOAT,
+  stock_splits  FLOAT,
+  fetched_at    TIMESTAMP_NTZ,
   source_file   VARCHAR(512),
   loaded_at     TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
@@ -115,10 +118,13 @@ CREATE TABLE IF NOT EXISTS MARKET_DATA.RAW.FUNDAMENTALS (
 -- 6. Load prices
 --
 -- COPY INTO skips files it has already loaded. A file overwritten in S3
--- has a new checksum though, so it loads again.
+-- has a new checksum though, so it loads again; stg_prices keeps the
+-- newest copy. Files written before fetched_at existed fall back to their
+-- S3 upload time, which is when they were fetched.
 
 COPY INTO MARKET_DATA.RAW.PRICES (
-  trade_date, ticker, open, high, low, close, adj_close, volume, source_file
+  trade_date, ticker, open, high, low, close, adj_close, volume,
+  dividends, stock_splits, fetched_at, source_file
 )
 FROM (
   SELECT
@@ -130,6 +136,9 @@ FROM (
     $1:close::FLOAT,
     $1:adj_close::FLOAT,
     $1:volume::FLOAT,
+    $1:dividends::FLOAT,
+    $1:stock_splits::FLOAT,
+    COALESCE(TRY_TO_TIMESTAMP_NTZ($1:fetched_at::VARCHAR), METADATA$FILE_LAST_MODIFIED),
     METADATA$FILENAME
   FROM @PRICES_STAGE
 )
@@ -184,3 +193,23 @@ FROM MARKET_DATA.RAW.FUNDAMENTALS;
 SELECT COUNT(*) AS null_dates
 FROM MARKET_DATA.RAW.PRICES
 WHERE trade_date IS NULL;
+
+
+-- 9. Upgrading a table created before Sept 2026
+--
+-- Prices gained dividends, split ratios and fetch time, and fundamentals
+-- now keep the first filing of each period instead of the last. Existing
+-- rows can't be fixed in place. Re-pull first:
+--
+--   python scripts/ingest_prices.py --start 2025-06-01
+--   python scripts/ingest_fundamentals.py
+--
+-- then add the columns, empty both tables (TRUNCATE also clears COPY's load
+-- history, so every file loads again) and rerun steps 6 and 7.
+
+ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS dividends FLOAT;
+ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS stock_splits FLOAT;
+ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP_NTZ;
+
+TRUNCATE TABLE MARKET_DATA.RAW.PRICES;
+TRUNCATE TABLE MARKET_DATA.RAW.FUNDAMENTALS;
