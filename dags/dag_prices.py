@@ -1,9 +1,11 @@
 """
 Daily price ingestion.
 
-Runs 6am ET on weekdays, after Yahoo has settled the previous session.
-Pulls the last 10 days and skips dates already in S3, so if a run fails
-the next one fills the gap.
+Runs 6am ET on weekdays, after Yahoo has settled the previous session and
+before the open (int_prices_daily assumes a fetch on a split's ex-date
+doesn't include that split yet). Pulls the last 10 days, writes new
+dates, and adds any tickers missing from dates already in S3, so a failed
+run or batch gets filled in by the next one.
 """
 
 from __future__ import annotations
