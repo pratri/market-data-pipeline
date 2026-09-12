@@ -1,8 +1,10 @@
 name: CI
 
-# Lint, DAG import check and dbt parse run on every push and PR, no
-# credentials needed. The build job runs dbt against Snowflake and is
-# manual only, since it uses trial credits.
+# Everything except `build` runs on every push and PR and needs no
+# credentials. `dbt parse` only resolves refs and Jinja, so the models also
+# get parsed as Snowflake by sqlfluff and actually run on DuckDB against a
+# fixture. The build job runs dbt against Snowflake and is manual only,
+# since it uses trial credits.
 
 on:
   push:
@@ -114,6 +116,58 @@ jobs:
         working-directory: dbt
         run: dbt parse
 
+
+  parse-sql-as-snowflake:
+    name: Parse SQL as Snowflake
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+
+      # Fails on SQL Snowflake can't parse: typos, unbalanced brackets, a
+      # clause in the wrong dialect. It won't catch a function that exists
+      # elsewhere but not in Snowflake, so it's a floor, not a guarantee.
+      # Config (including the ref/source stubs) is in .sqlfluff.
+      - name: Parse models
+        run: sqlfluff parse dbt/models
+
+      - name: Parse singular tests
+        run: sqlfluff parse dbt/tests
+
+  test-models:
+    name: Run models on DuckDB
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install
+        run: pip install duckdb pandas pyarrow pyyaml
+
+      # Extraction rules that the fixtures can't cover, because the fixtures
+      # are what extraction already produced.
+      - name: Ingestion unit tests
+        run: python tests/test_ingestion.py
+
+      # Builds every model over 21 tickers of real SEC and Yahoo data, runs
+      # the tests declared in the .yml files and dbt/tests/, then checks
+      # values with a known right answer (headline revenue, market cap
+      # across a split, the quarter each trading day should be using).
+      - name: Build models and check the output
+        run: python tests/run_models_duckdb.py
 
   build:
     name: Build and test against Snowflake
