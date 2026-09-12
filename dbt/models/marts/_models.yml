@@ -4,7 +4,7 @@ models:
   - name: fct_daily_metrics
     description: >
       Daily prices joined to the latest fundamentals filed on or before each
-      trade date. Joins on filing date, not period end.
+      trade date. Joins on first filing date, not period end.
     columns:
       - name: trade_date
         tests: [not_null]
@@ -17,25 +17,39 @@ models:
       - name: sector
         tests: [not_null]
       - name: close_price
+        description: The price it actually traded at that day.
         tests:
           - not_null
           - dbt_utils.accepted_range:
               min_value: 0
               inclusive: false
+      - name: split_adjusted_close_price
+        description: Close adjusted for every split and spinoff known now, like Yahoo's chart.
+      - name: shares_outstanding
+        description: Share count used for market cap, adjusted for splits since it was filed.
       - name: days_since_filing
-        description: Trade date minus filing date. Negative would mean lookahead.
+        description: >
+          Trade date minus filing date. Negative would mean lookahead. It
+          can't catch a stale quarter, tests/assert_attached_quarter_is_current
+          does that.
         tests:
           - dbt_utils.accepted_range:
               min_value: 0
               inclusive: true
+      - name: shares_basis
+        tests:
+          - accepted_values:
+              values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
+              config:
+                where: "shares_outstanding is not null"
       - name: pe_ratio
         description: >
-          Market cap over TTM net income. Null for negative earnings or fewer
-          than 4 quarters.
+          Market cap over TTM net income. Null for negative earnings or
+          without four consecutive quarters.
       - name: price_to_sales
         description: >
-          Null for Financials on purpose, since bank revenue isn't comparable.
-          Use price_to_book for those.
+          Null for banks and brokers on purpose, since their revenue is net of
+          interest expense. Use price_to_book for those.
       - name: market_cap
         tests:
           - dbt_utils.accepted_range:
@@ -46,6 +60,34 @@ models:
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [trade_date, ticker]
+
+  - name: mart_sector_daily
+    description: >
+      One row per sector per trading day. Cap-weighted and median ratios for
+      the dashboard, plus how many companies are behind each number.
+    columns:
+      - name: trade_date
+        tests: [not_null]
+      - name: sector
+        tests: [not_null]
+      - name: companies
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 1
+              inclusive: true
+      - name: total_market_cap
+        description: Sum over companies that have one, so read it with companies_missing_market_cap.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false
+      - name: cap_weighted_pe
+        description: Total market cap over total TTM earnings, loss makers included.
+      - name: companies_missing_market_cap
+        description: Companies in the sector with no share count, so not in the total.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [trade_date, sector]
 
   - name: dim_companies
     description: One row per company with sector, latest figures and data quality flags.
@@ -71,7 +113,7 @@ models:
                 - Energy
                 - Unclassified
       - name: revenue_metric_applicable
-        description: False for Financials, where revenue ratios are suppressed.
+        description: False for banks and brokers, where revenue ratios are suppressed.
       - name: insufficient_revenue_history
         description: True when a company has fewer than 4 quarters of revenue.
       - name: has_stale_fundamentals
