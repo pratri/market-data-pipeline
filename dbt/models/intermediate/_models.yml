@@ -21,8 +21,9 @@ models:
           differencing crossed two different revenue tags.
         tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: true
+              arguments:
+                min_value: 0
+                inclusive: true
               config:
                 where: "revenue is not null"
       - name: shares_outstanding
@@ -31,8 +32,9 @@ models:
           nulled, since MCD reports weighted average shares in millions.
         tests:
           - dbt_utils.accepted_range:
-              min_value: 1000000
-              inclusive: true
+              arguments:
+                min_value: 1000000
+                inclusive: true
               config:
                 where: "shares_outstanding is not null"
       - name: shares_filed_date
@@ -44,16 +46,18 @@ models:
           TSLA 1,762%.
         tests:
           - dbt_utils.accepted_range:
-              min_value: -5
-              max_value: 5
+              arguments:
+                min_value: -5
+                max_value: 5
               config:
                 where: "revenue_yoy_growth is not null"
                 severity: warn
       - name: revenue_qoq_growth
         tests:
           - dbt_utils.accepted_range:
-              min_value: -5
-              max_value: 5
+              arguments:
+                min_value: -5
+                max_value: 5
               config:
                 where: "revenue_qoq_growth is not null"
                 severity: warn
@@ -63,7 +67,8 @@ models:
           difference of two YTD figures (Q2 = H1 - Q1 and so on).
         tests:
           - accepted_values:
-              values: ['as_reported', 'derived']
+              arguments:
+                values: ['as_reported', 'derived']
               config:
                 where: "revenue is not null"
       - name: shares_basis
@@ -73,12 +78,14 @@ models:
           known count with no age limit.
         tests:
           - accepted_values:
-              values: ['instant', 'weighted_average', 'carried_forward']
+              arguments:
+                values: ['instant', 'weighted_average', 'carried_forward']
               config:
                 where: "shares_outstanding is not null"
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [ticker, period_end]
+          arguments:
+            combination_of_columns: [ticker, period_end]
 
   - name: int_prices_daily
     description: >
@@ -103,7 +110,8 @@ models:
           Null on each ticker's first day.
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [trade_date, ticker]
+          arguments:
+            combination_of_columns: [trade_date, ticker]
 
   - name: int_stock_splits
     description: >
@@ -113,15 +121,17 @@ models:
         description: Yahoo's price adjustment ratio.
         tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: false
+              arguments:
+                min_value: 0
+                inclusive: false
       - name: share_split_ratio
         description: >
           How much the share count changed. Null for a plain spinoff, which
           moves the price but not the share count.
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [ticker, split_date]
+          arguments:
+            combination_of_columns: [ticker, split_date]
 
   - name: int_market_cap_shares
     description: >
@@ -133,12 +143,15 @@ models:
         tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 1000000
-              inclusive: true
+              arguments:
+                min_value: 1000000
+                inclusive: true
       - name: shares_basis
         tests:
           - accepted_values:
-              values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
+              arguments:
+                values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [ticker, trade_date]
+          arguments:
+            combination_of_columns: [ticker, trade_date]

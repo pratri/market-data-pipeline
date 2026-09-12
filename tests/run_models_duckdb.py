@@ -146,6 +146,8 @@ def run_generic(con, table: str, column, test) -> None:
     kind, cfg = (test, {}) if isinstance(test, str) else next(iter(test.items()))
     cfg = cfg or {}
     config = cfg.get("config", {}) if isinstance(cfg, dict) else {}
+    # dbt 1.12 wants generic test arguments nested under `arguments`
+    cfg = cfg.get("arguments", cfg) if isinstance(cfg, dict) else cfg
     where = config.get("where")
     warn = config.get("severity") == "warn"
     guard = f" and ({where})" if where else ""

@@ -12,8 +12,9 @@ models:
         tests:
           - not_null
           - relationships:
-              to: ref('dim_companies')
-              field: ticker
+              arguments:
+                to: ref('dim_companies')
+                field: ticker
       - name: sector
         tests: [not_null]
       - name: close_price
@@ -21,8 +22,9 @@ models:
         tests:
           - not_null
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: false
+              arguments:
+                min_value: 0
+                inclusive: false
       - name: split_adjusted_close_price
         description: Close adjusted for every split and spinoff known now, like Yahoo's chart.
       - name: shares_outstanding
@@ -34,12 +36,14 @@ models:
           does that.
         tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: true
+              arguments:
+                min_value: 0
+                inclusive: true
       - name: shares_basis
         tests:
           - accepted_values:
-              values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
+              arguments:
+                values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
               config:
                 where: "shares_outstanding is not null"
       - name: pe_ratio
@@ -53,13 +57,15 @@ models:
       - name: market_cap
         tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: false
+              arguments:
+                min_value: 0
+                inclusive: false
               config:
                 where: "market_cap is not null"
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [trade_date, ticker]
+          arguments:
+            combination_of_columns: [trade_date, ticker]
 
   - name: mart_sector_daily
     description: >
@@ -73,21 +79,24 @@ models:
       - name: companies
         tests:
           - dbt_utils.accepted_range:
-              min_value: 1
-              inclusive: true
+              arguments:
+                min_value: 1
+                inclusive: true
       - name: total_market_cap
         description: Sum over companies that have one, so read it with companies_missing_market_cap.
         tests:
           - dbt_utils.accepted_range:
-              min_value: 0
-              inclusive: false
+              arguments:
+                min_value: 0
+                inclusive: false
       - name: cap_weighted_pe
         description: Total market cap over total TTM earnings, loss makers included.
       - name: companies_missing_market_cap
         description: Companies in the sector with no share count, so not in the total.
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [trade_date, sector]
+          arguments:
+            combination_of_columns: [trade_date, sector]
 
   - name: dim_companies
     description: One row per company with sector, latest figures and data quality flags.
@@ -102,16 +111,17 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values:
-                - Technology
-                - Financials
-                - Health Care
-                - Industrials
-                - Consumer Staples
-                - Consumer Discretionary
-                - Communication Services
-                - Energy
-                - Unclassified
+              arguments:
+                values:
+                  - Technology
+                  - Financials
+                  - Health Care
+                  - Industrials
+                  - Consumer Staples
+                  - Consumer Discretionary
+                  - Communication Services
+                  - Energy
+                  - Unclassified
       - name: revenue_metric_applicable
         description: False for banks and brokers, where revenue ratios are suppressed.
       - name: insufficient_revenue_history
