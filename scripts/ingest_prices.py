@@ -2,7 +2,12 @@
 Daily OHLCV from Yahoo Finance, written to S3 as one parquet file per date.
 
 yfinance scrapes Yahoo and fails now and then, so downloads retry with
-backoff. --skip-existing skips dates already in S3.
+backoff. Rows also carry dividends, split ratios and when they were
+fetched. Yahoo's close is split-adjusted as of the download, so dbt needs
+the fetch time to put rows downloaded before a split on the same basis.
+
+--skip-existing leaves dates already in S3 alone, except to add tickers a
+file is missing, so one failed batch doesn't leave a permanent hole.
 
 Usage:
     python scripts/ingest_prices.py
@@ -14,19 +19,20 @@ import argparse
 import json
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
 
 sys.path.insert(0, str(Path(__file__).parent))
-from s3_utils import get_bucket, list_s3_keys, write_parquet_to_s3
+from s3_utils import get_bucket, list_s3_keys, read_parquet_from_s3, write_parquet_to_s3
 
 PROJECT_ROOT = Path(__file__).parent.parent
 TICKER_MAP_PATH = PROJECT_ROOT / "data" / "ticker_cik_map.json"
 
 S3_PREFIX = "raw/prices"
+FETCHED_AT_FORMAT = "%Y-%m-%d %H:%M:%S"   # UTC
 
 BATCH_SIZE = 20
 MAX_RETRIES = 4
@@ -41,6 +47,10 @@ def load_tickers() -> list[str]:
             "Run scripts/build_ticker_universe.py first."
         )
     return sorted(json.loads(TICKER_MAP_PATH.read_text()).keys())
+
+
+def partition_key(day_str: str) -> str:
+    return f"{S3_PREFIX}/date={day_str}/prices.parquet"
 
 
 def existing_dates(bucket: str) -> set[str]:
@@ -65,6 +75,7 @@ def download_batch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
                 end=end,
                 interval="1d",
                 auto_adjust=False,   # raw OHLC plus adj_close (close is still split-adjusted)
+                actions=True,        # adds Dividends and Stock Splits
                 group_by="column",
                 threads=True,
                 progress=False,
@@ -105,7 +116,10 @@ def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
 
     long_df.columns = [str(c).lower().replace(" ", "_") for c in long_df.columns]
 
-    wanted = ["date", "ticker", "open", "high", "low", "close", "adj_close", "volume"]
+    wanted = [
+        "date", "ticker", "open", "high", "low", "close", "adj_close", "volume",
+        "dividends", "stock_splits",
+    ]
     present = [c for c in wanted if c in long_df.columns]
     long_df = long_df[present]
 
@@ -116,24 +130,43 @@ def to_long_format(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     return long_df
 
 
-def upload_partitions(df: pd.DataFrame, bucket: str, skip: set[str]) -> tuple[int, int]:
-    """Write one parquet file per date. Returns (written, skipped)."""
-    if df.empty:
-        return 0, 0
+def upload_partitions(df: pd.DataFrame, bucket: str, existing: set[str]) -> tuple[int, int, int]:
+    """Write one parquet file per date. Returns (written, refilled, skipped).
 
-    written = skipped = 0
+    A date already in S3 is only rewritten to add tickers its file is
+    missing. Rows already in the file are kept as they are.
+    """
+    if df.empty:
+        return 0, 0, 0
+
+    written = refilled = skipped = 0
     for day, group in df.groupby("date"):
         day_str = str(day)
-        if day_str in skip:
-            skipped += 1
-            continue
+        key = partition_key(day_str)
+        group = group.drop(columns=["date"])   # date is in the key
 
-        key = f"{S3_PREFIX}/date={day_str}/prices.parquet"
-        # date is in the key, no need to store it in the file
-        write_parquet_to_s3(group.drop(columns=["date"]), key, bucket=bucket)
-        written += 1
+        if day_str in existing:
+            current, last_modified = read_parquet_from_s3(key, bucket=bucket)
+            missing = group[~group["ticker"].isin(current["ticker"])]
+            if missing.empty:
+                skipped += 1
+                continue
 
-    return written, skipped
+            # files from before fetched_at existed: upload time is the best guess
+            upload_time = last_modified.astimezone(timezone.utc).strftime(FETCHED_AT_FORMAT)
+            if "fetched_at" in current.columns:
+                current["fetched_at"] = current["fetched_at"].fillna(upload_time)
+            else:
+                current["fetched_at"] = upload_time
+
+            group = pd.concat([current, missing], ignore_index=True)
+            refilled += 1
+        else:
+            written += 1
+
+        write_parquet_to_s3(group, key, bucket=bucket)
+
+    return written, refilled, skipped
 
 
 def main() -> None:
@@ -143,7 +176,7 @@ def main() -> None:
     parser.add_argument("--days", type=int,
                         help="Shorthand: last N days. Overrides --start.")
     parser.add_argument("--skip-existing", action="store_true",
-                        help="Skip dates already present in S3.")
+                        help="Leave dates already in S3 alone, apart from adding missing tickers.")
     args = parser.parse_args()
 
     end = args.end or str(date.today())
@@ -159,9 +192,9 @@ def main() -> None:
     print(f"Window:  {start} to {end}")
     print(f"Tickers: {len(tickers)}\n")
 
-    skip = existing_dates(bucket) if args.skip_existing else set()
-    if skip:
-        print(f"Found {len(skip)} dates already in S3, will skip those.\n")
+    existing = existing_dates(bucket) if args.skip_existing else set()
+    if existing:
+        print(f"Found {len(existing)} dates already in S3, only missing tickers get added to those.\n")
 
     all_frames = []
     failed_batches = []
@@ -176,6 +209,7 @@ def main() -> None:
             continue
 
         long_df = to_long_format(raw, batch)
+        long_df["fetched_at"] = datetime.now(timezone.utc).strftime(FETCHED_AT_FORMAT)
         print(f"  -> {len(long_df):,} rows")
         all_frames.append(long_df)
 
@@ -188,11 +222,13 @@ def main() -> None:
     combined = pd.concat(all_frames, ignore_index=True)
     print(f"\nUploading {len(combined):,} rows...")
 
-    written, skipped = upload_partitions(combined, bucket, skip)
+    written, refilled, skipped = upload_partitions(combined, bucket, existing)
 
-    print(f"\nWrote {written} date partitions to s3://{bucket}/{S3_PREFIX}")
+    print(f"\nWrote {written} new date partitions to s3://{bucket}/{S3_PREFIX}")
+    if refilled:
+        print(f"Added missing tickers to {refilled} existing dates.")
     if skipped:
-        print(f"Skipped {skipped} dates already present.")
+        print(f"Skipped {skipped} dates already complete.")
     print(f"Tickers with data: {combined['ticker'].nunique()} / {len(tickers)}")
 
     if failed_batches:

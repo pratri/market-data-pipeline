@@ -6,6 +6,7 @@ Config comes from environment variables, or a .env file in the project root.
 
 import io
 import os
+from datetime import datetime
 from pathlib import Path
 
 import boto3
@@ -81,6 +82,15 @@ def write_parquet_to_s3(df: pd.DataFrame, key: str, bucket: str | None = None) -
         raise
 
     return f"s3://{bucket}/{key}"
+
+
+def read_parquet_from_s3(key: str, bucket: str | None = None) -> tuple[pd.DataFrame, datetime]:
+    """Read a parquet object. Returns (DataFrame, LastModified)."""
+    bucket = bucket or get_bucket()
+    client = get_s3_client()
+
+    obj = client.get_object(Bucket=bucket, Key=key)
+    return pd.read_parquet(io.BytesIO(obj["Body"].read())), obj["LastModified"]
 
 
 def s3_key_exists(key: str, bucket: str | None = None) -> bool:
