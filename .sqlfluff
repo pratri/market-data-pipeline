@@ -1,0 +1,19 @@
+# Parse-only gate for the dbt models. CI runs `sqlfluff parse`, which fails on
+# SQL that doesn't parse as Snowflake: typos, unbalanced brackets, a clause
+# from the wrong dialect. `dbt parse` doesn't look at the SQL at all, it only
+# resolves refs and Jinja.
+#
+# It is a floor, not a guarantee. A function that exists in another warehouse
+# but not Snowflake still parses fine here; only a real `dbt build` catches
+# that.
+#
+# ref/source/config are stubbed so the models template without dbt.
+
+[sqlfluff]
+dialect = snowflake
+templater = jinja
+
+[sqlfluff:templater:jinja:macros]
+ref = {% macro ref(model_name) %}{{ model_name }}{% endmacro %}
+source = {% macro source(source_name, table_name) %}{{ source_name }}_{{ table_name }}{% endmacro %}
+config = {% macro config() %}{% set ignored = kwargs %}{% endmacro %}

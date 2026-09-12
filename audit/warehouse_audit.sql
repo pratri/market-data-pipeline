@@ -1,58 +1,57 @@
--- Warehouse audit queries. Run top to bottom in Snowsight.
+-- Warehouse audit queries. Run top to bottom in Snowsight after a build.
 -- Schemas assume the profile's ANALYTICS target (dbt appends _STAGING etc).
--- "Expect" notes come from replaying the models on the local Aug 28 parquet
--- and the tableau/market_metrics.csv export.
+--
+-- "Expect" notes are what a correct build should show, checked by running
+-- the models in DuckDB against SEC and Yahoo data pulled in Sept 2026.
+-- "Was" notes are what the old build showed, for comparison.
 
 use database MARKET_DATA;
 
 
 -- ===========================================================================
--- 1. Fundamentals attached to the wrong quarter (as-of join)
+-- 1. Is each trading day using the right quarter?
 -- ===========================================================================
 
--- 1a. Age of the attached quarter by month. A large-cap's latest quarter
--- should never be much more than ~150 days old. days_since_filing will look
--- normal because filed_date is wrong too.
--- Expect: ~87% of rows over 200 days in Sep 2025, ~60% in Apr 2026.
+-- 1a. Age of the attached quarter by month. A large cap's latest quarter
+-- shouldn't be much more than ~150 days old.
+-- Expect: max age under ~150 most months; C pushes Jul-Sep 2026 past 200
+-- because SEC's API is missing its 2026 10-Qs.
+-- Was: 87% of Sep 2025 rows over 200 days, with normal days_since_filing.
 select
     date_trunc('month', trade_date)                                        as month,
     count(*)                                                               as row_count,
     round(avg(datediff('day', fundamentals_period_end, trade_date)))       as avg_quarter_age_days,
-    round(avg(iff(datediff('day', fundamentals_period_end, trade_date) > 200, 1, 0)), 2)
+    max(datediff('day', fundamentals_period_end, trade_date))              as max_quarter_age_days,
+    round(avg(iff(datediff('day', fundamentals_period_end, trade_date) > 200, 1, 0)), 3)
                                                                            as share_over_200d,
     round(avg(days_since_filing))                                          as avg_days_since_filing
 from ANALYTICS_MARTS.FCT_DAILY_METRICS
 group by 1
 order by 1;
 
+-- Which tickers are stale, and since when.
+select ticker, min(trade_date) as stale_from, max(fundamentals_period_end) as last_quarter
+from ANALYTICS_MARTS.FCT_DAILY_METRICS
+where datediff('day', fundamentals_period_end, trade_date) > 200
+group by 1
+order by 2;
+
 -- 1b. AAPL, one row per change in attached quarter.
--- Expect: 2025-09-11 -> 2024-06-29 (rev 85.777bn, a year old),
---         2025-10-31 -> 2023-09-30 (two years old),
---         2026-01-30 -> no change even though Q1 FY26 was filed that day.
+-- Expect: 2025-09-02 -> 2025-06-28 ($94.0bn), 2025-10-31 -> 2025-09-27,
+--         2026-01-30 -> 2025-12-27, 2026-05-01 -> 2026-03-28.
+-- Was: 2025-09-11 -> 2024-06-29 ($85.8bn), 2025-10-31 -> 2023-09-30.
 select trade_date, fundamentals_period_end, fundamentals_filed_date,
-       revenue, ttm_net_income, pe_ratio
+       revenue, ttm_net_income, pe_ratio, market_cap
 from ANALYTICS_MARTS.FCT_DAILY_METRICS
 where ticker = 'AAPL'
 qualify fundamentals_period_end is distinct from
         lag(fundamentals_period_end) over (order by trade_date)
 order by trade_date;
 
--- 1c. Root cause. dedupe keeps the LAST filing that mentioned a period, and
--- every 10-Q/10-K repeats prior periods as comparatives. So "filed" is when
--- the period was last repeated, not when it was first public.
--- Expect: AAPL Q3 FY24 (ends 2024-06-29) filed 2025-08-01, fiscal_year 2025.
-select metric, period_start, period_end, period_type, value, fiscal_year,
-       fiscal_period, form, filed,
-       datediff('day', period_end, filed) as days_after_period_end
-from ANALYTICS_STAGING.STG_FUNDAMENTALS
-where ticker = 'AAPL'
-  and metric = 'revenue'
-  and period_end >= '2024-01-01'
-order by period_end, period_start;
-
--- 1d. How widespread. Large accelerated filers have 40 days for a 10-Q and
--- 60 for a 10-K, so anything past 150 is a re-report.
--- Expect: roughly 70% of all facts.
+-- 1c. Filed dates should be the first filing. Large filers have 40 days
+-- for a 10-Q and 60 for a 10-K.
+-- Expect: roughly 6% of facts over 150 days (late-tagged history, amended
+-- filings, SEC gaps). Was: ~70%.
 select period_type,
        count(*) as facts,
        round(avg(iff(datediff('day', period_end, filed) > 150, 1, 0)), 3) as share_filed_late
@@ -60,8 +59,8 @@ from ANALYTICS_STAGING.STG_FUNDAMENTALS
 group by 1
 order by 1;
 
--- 1e. fiscal_year/fiscal_period come from the filing, not the period.
--- For these calendar-year filers the difference should always be 0.
+-- 1d. fiscal_year should match the period for calendar-year filers.
+-- Expect: nearly all 0.
 select fiscal_year - year(period_end) as fy_minus_calendar_year, count(*)
 from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
 where ticker in ('JPM', 'BAC', 'KO', 'PFE', 'CVX', 'IBM', 'GOOGL', 'META', 'AMZN', 'TSLA')
@@ -70,66 +69,28 @@ order by 1;
 
 
 -- ===========================================================================
--- 2. Derived Q4 dropped by the 200-day filing-gap guard
+-- 2. Coverage holes that skew sector aggregates
 -- ===========================================================================
 
--- Because of 1c, FY(Y) is "filed" with the 10-K two years later while 9M(Y)
--- is "filed" with next year's Q3 10-Q. That's ~15 months apart for almost
--- every company, not just IBM, so the guard removes nearly every older Q4.
--- Expect: annual rows rejected ~100% for years before the last two.
-with s as (
-    select
-        ticker, metric, tag, period_start, period_end, period_type, filed,
-        lag(filed) over (partition by ticker, metric, period_start, tag order by period_end)      as prev_filed,
-        lag(period_end) over (partition by ticker, metric, period_start, tag order by period_end) as prev_end
-    from ANALYTICS_STAGING.STG_FUNDAMENTALS
-    where metric = 'revenue'
-      and period_type in ('quarterly', 'half_year', 'nine_month', 'annual')
-)
-select year(period_end) as yr,
-       period_type,
-       count(*) as diff_candidates,
-       count_if(datediff('day', prev_filed, filed) not between 0 and 200) as rejected_by_filed_gap
-from s
-where prev_filed is not null
-  and datediff('day', prev_end, period_end) between 80 and 100
-group by 1, 2
-order by 1, 2;
-
--- Revenue coverage per year for non-financials. A year with 4 quarter rows
--- and only 3 revenues is a missing Q4.
-select year(i.period_end) as yr,
-       count(*) as quarter_rows,
-       count(i.revenue) as with_revenue,
-       count_if(i.revenue_source = 'derived') as derived
-from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY i
-join ANALYTICS_MARTS.DIM_COMPANIES d using (ticker)
-where d.revenue_metric_applicable
-group by 1
-order by 1;
-
-
--- ===========================================================================
--- 3. Coverage holes that skew sector aggregates
--- ===========================================================================
-
--- 3a. Tickers with no P/E, P/S or market cap for the whole window.
--- Expect: V (no market cap at all), XOM (no fundamentals until Aug 2026),
--- COST, PEP, CAT, MA, PG, UNH with zero P/E despite being profitable.
+-- 2a. Tickers missing market cap, P/E or P/S on many days.
+-- Expect: V (no share count in SEC data), INTC and BA (losses, so no P/E),
+-- SPGI (no TTM Aug 2025-Feb 2026, SEC's API lacks its FY2024 10-K), and the
+-- banks with no P/S by design.
 select ticker, sector,
        count(*) as days,
        count(market_cap) as days_mcap,
        count(pe_ratio) as days_pe,
        count(price_to_sales) as days_ps,
-       count(price_to_book) as days_pb
+       count(price_to_book) as days_pb,
+       count_if(ttm_net_income < 0) as days_negative_ttm
 from ANALYTICS_MARTS.FCT_DAILY_METRICS
 group by 1, 2
-having count(pe_ratio) < count(*) * 0.5 or count(market_cap) < count(*)
+having count(pe_ratio) < count(*) * 0.9
+    or count(price_to_sales) < count(*) * 0.9
+    or count(market_cap) < count(*)
 order by days_mcap, days_pe;
 
--- 3b. 52/53-week filers on a 12/12/12/16-week calendar (COST, PEP).
--- Q4 (111-118 days), H1 (167) and 9M (251) all fall outside the buckets,
--- so there's never a Q4 and TTM never gets 4 quarters.
+-- 2b. Durations that fit no bucket. Expect only a few GS and MS oddities.
 select ticker, metric, period_days, count(*) as n
 from ANALYTICS_STAGING.STG_FUNDAMENTALS
 where period_type = 'other'
@@ -137,40 +98,23 @@ where period_type = 'other'
 group by 1, 2, 3
 order by n desc;
 
--- 3c. Net income only from proxy statements. CAT and MA have no quarterly
--- net income after 2011/2014 in the local snapshot, only annual DEF 14A
--- (pay-versus-performance) rows.
-select ticker, form, period_type,
-       min(period_end) as first_period, max(period_end) as last_period, count(*) as n
-from ANALYTICS_STAGING.STG_FUNDAMENTALS
-where metric = 'net_income'
-  and ticker in ('CAT', 'MA', 'PG', 'UNH')
-group by all
-order by ticker, last_period;
+-- 2c. Quarters with no revenue sandwiched between two that have it.
+-- Expect: IBM 2021 Q4 (dropped on purpose, Kyndryl), SPGI 2024 Q4 (SEC gap),
+-- and a few pre-2020 cases.
+select ticker, period_end, prev_revenue, next_revenue
+from (
+    select ticker, period_end, revenue,
+           lag(revenue)  over (partition by ticker order by period_end) as prev_revenue,
+           lead(revenue) over (partition by ticker order by period_end) as next_revenue
+    from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
+)
+where revenue is null
+  and prev_revenue is not null
+  and next_revenue is not null
+order by period_end desc;
 
--- Non 10-K/10-Q forms that won the dedupe (8-K recasts, proxy statements).
-select form, metric, count(*) as n, count(distinct ticker) as tickers
-from ANALYTICS_STAGING.STG_FUNDAMENTALS
-where form not in ('10-K', '10-Q', '10-K/A', '10-Q/A')
-group by 1, 2
-order by n desc;
-
--- 3d. Share count coverage. V has zero non-dimensional share rows (it only
--- tags per class), XOM's history starts at its new holdco CIK.
-select d.ticker, d.cik,
-       min(s.period_end) as first_shares_period,
-       min(s.filed)      as first_shares_filed,
-       count(s.value)    as share_rows
-from ANALYTICS_MARTS.DIM_COMPANIES d
-left join ANALYTICS_STAGING.STG_FUNDAMENTALS s
-    on s.ticker = d.ticker and s.metric = 'shares_outstanding'
-group by 1, 2
-order by share_rows, first_shares_filed desc;
-
--- 3e. Sector coverage changing day to day. Any row here is a step in a
--- sector time series caused by data, not the market.
--- Expect: Energy jumps when XOM appears (Aug 2026), 2026-08-28 drops to 16
--- tickers total.
+-- 2d. Sector coverage changing day to day. Any row is a step in a sector
+-- time series caused by data rather than the market.
 with d as (
     select trade_date, sector,
            count(*) as tickers,
@@ -191,7 +135,7 @@ qualify mcap_coverage_change != 0
      or abs(sector_mcap_change) > 0.05
 order by trade_date, sector;
 
--- 3f. Partial price partitions. --skip-existing never refills these.
+-- 2e. Partial price days. Expect none.
 select trade_date, count(distinct ticker) as tickers
 from ANALYTICS_STAGING.STG_PRICES
 group by 1
@@ -200,31 +144,57 @@ order by 1;
 
 
 -- ===========================================================================
--- 4. Market cap wrong by a constant factor
+-- 3. Market cap
 -- ===========================================================================
 
--- 4a. NFLX 10-for-1 split (Nov 2025). Yahoo prices are split-adjusted back
--- to the start, share counts are as filed.
--- Expect: ~$52bn in Sep 2025 (real ~$500bn), jumps to ~$287bn on 2026-07-17.
-select trade_date, close_price, shares_outstanding, shares_basis,
-       fundamentals_period_end, round(market_cap / 1e9, 1) as mcap_bn
+-- 3a. Around NFLX's 10-for-1. Expect close ~$1,112 then ~$110 with market cap
+-- steady at ~$470bn. Was: ~$52bn in Sep 2025.
+select trade_date, close_price, split_adjusted_close_price, shares_outstanding,
+       shares_basis, round(market_cap / 1e9, 1) as mcap_bn
 from ANALYTICS_MARTS.FCT_DAILY_METRICS
 where ticker = 'NFLX'
-qualify shares_outstanding is distinct from lag(shares_outstanding) over (order by trade_date)
+  and trade_date between '2025-11-10' and '2025-11-21'
 order by trade_date;
 
--- 4b. Market cap moving differently from price. Catches splits, unit
--- errors (MCD), share basis flips and quarter swaps.
-select ticker, trade_date, daily_return,
-       market_cap / lag(market_cap) over (partition by ticker order by trade_date) - 1 as mcap_change,
-       shares_basis
-from ANALYTICS_MARTS.FCT_DAILY_METRICS
-qualify abs(mcap_change - daily_return) > 0.05
-order by abs(mcap_change - daily_return) desc;
+-- 3b. Every price adjustment and what it did to the share count.
+-- Expect: NFLX 10 -> 10, NOW 5 -> 5, HON 1.061 -> null (spinoff),
+-- HON 0.9535 -> 0.5 (reverse split + spinoff), SPGI 1.057 -> null.
+select * from ANALYTICS_INTERMEDIATE.INT_STOCK_SPLITS order by split_date;
 
--- 4c. Share count jumps between quarters. Real buybacks move a few percent
--- a year; anything outside 0.8-1.25x is a split, a unit problem, or
--- instant vs weighted-average flipping.
+-- 3c. Latest market caps, smallest first. Everything here is > $50bn, so
+-- anything tiny or null needs a reason. Expect V null.
+select ticker, sector, close_price, round(market_cap / 1e9, 1) as mcap_bn,
+       shares_outstanding, shares_basis, days_since_filing
+from ANALYTICS_MARTS.FCT_DAILY_METRICS
+where trade_date = (select max(trade_date) from ANALYTICS_MARTS.FCT_DAILY_METRICS)
+order by market_cap nulls first;
+
+-- 3c-2. Cover page counts that were rejected because the same filing's
+-- us-gaap count disagrees. Expect MA (one share class on the cover), UPS
+-- (Class A left out) and V (no us-gaap count at all, so nothing to check).
+with cover as (
+    select ticker, filed, period_end, value as cover_shares
+    from ANALYTICS_STAGING.STG_FUNDAMENTALS
+    where metric = 'cover_shares_outstanding' and value >= 1000000
+),
+filing_counts as (
+    select ticker, filed, min(value) as min_count, max(value) as max_count
+    from ANALYTICS_STAGING.STG_FUNDAMENTALS
+    where metric = 'shares_outstanding' and value > 0
+    group by 1, 2
+)
+select c.ticker, c.filed, c.cover_shares, f.min_count, f.max_count,
+       round(c.cover_shares / nullif(f.max_count, 0), 3) as cover_over_max
+from cover c
+left join filing_counts f on f.ticker = c.ticker and f.filed = c.filed
+where c.filed >= dateadd('month', -18, current_date())
+  and (f.ticker is null
+       or least(abs(c.cover_shares / f.max_count - 1),
+                abs(c.cover_shares / (f.max_count * 1000000) - 1)) > 0.1)
+order by c.ticker, c.filed;
+
+-- 3d. Share count jumps between quarters (as filed, so splits show up here
+-- on purpose). Anything else outside 0.8-1.25x is worth a look.
 select ticker, period_end, shares_basis, shares_outstanding, prev_shares,
        round(shares_outstanding / prev_shares, 3) as ratio
 from (
@@ -233,74 +203,27 @@ from (
     from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
 )
 where prev_shares > 0
+  and period_end >= '2024-01-01'
   and shares_outstanding / prev_shares not between 0.8 and 1.25
-order by abs(ln(shares_outstanding / prev_shares)) desc;
-
--- 4d. Latest market caps, smallest first. Every company here is > $50bn,
--- so anything tiny or null is wrong. Check MCD after the <1M null fix: it
--- may now have no market cap at all.
-select ticker, sector, round(market_cap / 1e9, 1) as mcap_bn,
-       shares_outstanding, shares_basis, days_since_filing
-from ANALYTICS_MARTS.FCT_DAILY_METRICS
-where trade_date = (select max(trade_date) from ANALYTICS_MARTS.FCT_DAILY_METRICS)
-order by market_cap nulls first;
+order by period_end desc;
 
 
 -- ===========================================================================
--- 5. TTM and ratio logic
+-- 4. Revenue quality
 -- ===========================================================================
 
--- 5a. Uncommitted change: P/S now checks income_quarters_in_ttm instead of
--- revenue_quarters_in_ttm, so a TTM with a missing revenue quarter (sum
--- skips nulls) gets through and P/S is inflated. Should return 0.
-select count(*) as ps_without_full_revenue_ttm
-from ANALYTICS_MARTS.FCT_DAILY_METRICS
-where price_to_sales is not null
-  and ttm_revenue is null;
-
--- 5b. P/E has no span check. Four net-income rows spanning far more than a
--- year still produce a P/E.
-with t as (
-    select ticker, period_end,
-           count(net_income) over (partition by ticker order by period_end rows between 3 preceding and current row) as n_q,
-           datediff('day',
-               min(period_end) over (partition by ticker order by period_end rows between 3 preceding and current row),
-               period_end) as span_days
-    from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
-)
-select t.ticker, t.period_end, t.span_days, count(*) as fct_days_using_it
-from t
-join ANALYTICS_MARTS.FCT_DAILY_METRICS f
-    on f.ticker = t.ticker and f.fundamentals_period_end = t.period_end
-where t.n_q = 4
-  and t.span_days not between 250 and 290
-  and f.pe_ratio is not null
-group by 1, 2, 3
-order by span_days desc;
-
--- 5c. Same quarter split across two period_end dates a few days apart.
--- Breaks the 4-row TTM window and lag(x, 4).
-select ticker, prev_end, period_end,
-       datediff('day', prev_end, period_end) as gap_days,
-       revenue, net_income, total_assets, shares_outstanding
-from (
-    select *, lag(period_end) over (partition by ticker order by period_end) as prev_end
-    from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
-)
-where datediff('day', prev_end, period_end) < 20
-order by ticker, period_end;
-
--- 5d. Four quarters vs the reported annual figure. Mismatches mean the
--- quarters mix tags or bases (as-reported Q1-Q3 vs a restated FY).
+-- 4a. Four quarters vs the reported annual figure. Differences of a few
+-- percent are expected around spinoffs (quarters as originally reported,
+-- FY restated to continuing operations: GE 2024, DHR 2023, JNJ 2023).
 with fy as (
     select ticker, period_start, period_end, tag, value
     from ANALYTICS_STAGING.STG_FUNDAMENTALS
     where metric = 'revenue' and period_type = 'annual'
 )
 select fy.ticker, fy.period_end, fy.tag,
-       round(fy.value / 1e9, 2)          as fy_bn,
-       round(sum(q.revenue) / 1e9, 2)    as quarters_bn,
-       count(q.revenue)                  as n_quarters,
+       round(fy.value / 1e9, 2)                as fy_bn,
+       round(sum(q.revenue) / 1e9, 2)          as quarters_bn,
+       count(q.revenue)                        as n_quarters,
        round(sum(q.revenue) / fy.value - 1, 3) as diff
 from fy
 join ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY q
@@ -310,92 +233,89 @@ join ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY q
 group by 1, 2, 3, 4, fy.value
 having count(q.revenue) = 4
    and abs(sum(q.revenue) / fy.value - 1) > 0.02
-order by abs(diff) desc;
+order by fy.period_end desc;
 
--- 5e. Tag switches between consecutive as-reported quarters, with the value
--- jump. Big jumps at a tag change are scope changes, not growth.
-select ticker, period_end, prev_tag, tag, prev_value, value,
-       round(value / nullif(prev_value, 0) - 1, 3) as change
-from (
-    select ticker, period_end, tag, value,
-           lag(tag)   over (partition by ticker order by period_end) as prev_tag,
-           lag(value) over (partition by ticker order by period_end) as prev_value
-    from ANALYTICS_STAGING.STG_FUNDAMENTALS
-    where metric = 'revenue' and period_type = 'quarterly'
-)
-where tag != prev_tag
-order by abs(change) desc nulls last;
-
-
--- ===========================================================================
--- 6. GE and other QoQ outliers
--- ===========================================================================
-
--- 6a. Every big QoQ move with the source of BOTH sides. revenue_source only
--- describes the numerator. If outliers cluster where the previous quarter is
--- a derived fiscal Q4, it's the derivation, not the company.
+-- 4b. Big QoQ moves with the source of both sides. Expect only real ones
+-- (TSLA 2012, Intuit's tax-season quarter, 2008-09 banks).
 select ticker, period_end, revenue, revenue_source,
-       prev_revenue, prev_source, prev_period_end, revenue_qoq_growth
+       prev_revenue, prev_source, revenue_qoq_growth
 from (
     select *,
            lag(revenue)        over (partition by ticker order by period_end) as prev_revenue,
-           lag(revenue_source) over (partition by ticker order by period_end) as prev_source,
-           lag(period_end)     over (partition by ticker order by period_end) as prev_period_end
+           lag(revenue_source) over (partition by ticker order by period_end) as prev_source
     from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
 )
 where abs(revenue_qoq_growth) > 1
 order by abs(revenue_qoq_growth) desc;
 
--- 6b. GE raw facts around the 2015-2017 boundaries: which tag, which
--- duration and which filing each side came from.
-select metric, tag, period_start, period_end, period_type,
-       round(value / 1e9, 2) as bn, form, filed
-from ANALYTICS_STAGING.STG_FUNDAMENTALS
-where ticker = 'GE'
-  and metric = 'revenue'
-  and period_end between '2015-01-01' and '2017-12-31'
-order by period_end, period_start;
-
--- 6c. What the model made of it.
+-- 4c. GE around 2015-2017. Expect ~$25-34bn every quarter, no 977%.
 select period_end, round(revenue / 1e9, 2) as revenue_bn, revenue_source,
-       round(lag(revenue) over (order by period_end) / 1e9, 2) as prev_bn,
-       lag(revenue_source) over (order by period_end) as prev_source,
        revenue_qoq_growth, filed_date
 from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
 where ticker = 'GE'
   and period_end between '2015-01-01' and '2018-06-30'
 order by period_end;
 
+-- 4d. Spot check against headline revenue for Q2 2025 ($bn). Expect exact
+-- matches: AAPL 94.036, MSFT 76.441, GOOGL 96.428, AMZN 167.702, META 47.516,
+-- TSLA 22.496, NVDA 46.743 (Jul 27), CAT 16.569, WMT 177.402 (Jul 31),
+-- JNJ 23.743, XOM 81.506, V 10.172, MA 8.133.
+select ticker, period_end, round(revenue / 1e9, 3) as revenue_bn, revenue_source
+from ANALYTICS_INTERMEDIATE.INT_FUNDAMENTALS_QUARTERLY
+where ticker in ('AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA',
+                 'CAT', 'WMT', 'JNJ', 'XOM', 'V', 'MA')
+  and period_end between '2025-06-01' and '2025-07-31'
+order by ticker;
+
 
 -- ===========================================================================
--- 7. Tableau: sector aggregates
+-- 5. Tableau: sector aggregates
 -- ===========================================================================
 
--- AVG(pe_ratio) drops loss-makers and lets one outlier dominate
--- (Consumer Discretionary: mean 103 vs median 22 on 2026-08-27; Financials
--- P/B max 93). Compare against cap-weighted.
+-- mart_sector_daily is built for this. Cap-weighted ratios include loss
+-- makers, medians show the typical company, and companies_missing_market_cap
+-- says whether the total is short anyone (V has no share count).
+select sector, companies, companies_missing_market_cap, companies_with_pe,
+       round(total_market_cap / 1e9)   as mcap_bn,
+       round(cap_weighted_pe, 1)       as cap_weighted_pe,
+       round(median_pe, 1)             as median_pe,
+       round(cap_weighted_ps, 2)       as cap_weighted_ps,
+       round(cap_weighted_pb, 1)       as cap_weighted_pb,
+       round(median_revenue_yoy_growth, 3) as median_yoy_growth
+from ANALYTICS_MARTS.MART_SECTOR_DAILY
+where trade_date = (select max(trade_date) from ANALYTICS_MARTS.MART_SECTOR_DAILY)
+order by mcap_bn desc;
+
+-- What averaging the ratios instead would tell you. Expect the average to
+-- sit well above both the median and the cap-weighted figure for at least
+-- one sector.
 select sector,
-       count(*)                                  as tickers,
-       count(pe_ratio)                           as with_pe,
-       round(avg(pe_ratio), 1)                   as avg_pe,
-       round(median(pe_ratio), 1)                as median_pe,
-       round(sum(iff(ttm_net_income is not null, market_cap, null))
-             / nullif(sum(ttm_net_income), 0), 1) as cap_weighted_pe,
-       round(median(price_to_book), 1)           as median_pb,
-       round(max(price_to_book), 1)              as max_pb,
-       round(sum(market_cap) / 1e9)              as sector_mcap_bn,
-       count(market_cap)                         as with_mcap
+       round(avg(pe_ratio), 1)    as avg_pe,
+       round(median(pe_ratio), 1) as median_pe,
+       count(pe_ratio)            as with_pe,
+       count(*)                   as companies
 from ANALYTICS_MARTS.FCT_DAILY_METRICS
 where trade_date = (select max(trade_date) from ANALYTICS_MARTS.FCT_DAILY_METRICS)
 group by 1
-order by sector_mcap_bn desc;
+order by avg_pe desc;
+
+-- Sector coverage over time. Every change should have a reason (a loss
+-- quarter entering TTM, a company's first filing).
+select trade_date, sector, companies_with_market_cap, companies_with_pe
+from ANALYTICS_MARTS.MART_SECTOR_DAILY
+qualify companies_with_market_cap is distinct from
+            lag(companies_with_market_cap) over (partition by sector order by trade_date)
+     or companies_with_pe is distinct from
+            lag(companies_with_pe) over (partition by sector order by trade_date)
+order by trade_date;
 
 
 -- ===========================================================================
--- 8. Load hygiene
+-- 6. Load hygiene
 -- ===========================================================================
 
--- Snapshot completeness. A --limit run or a bad SEC day becomes "latest".
+-- Snapshot completeness. Each ticker reads its own newest snapshot, so a
+-- short snapshot doesn't drop anyone, but it's worth knowing about.
 select regexp_substr(source_file, 'snapshot_date=([0-9]{4}-[0-9]{2}-[0-9]{2})', 1, 1, 'e', 1) as snapshot,
        count(distinct ticker) as tickers,
        count(*) as row_count,
@@ -404,9 +324,16 @@ from RAW.FUNDAMENTALS
 group by 1
 order by 1 desc;
 
--- Re-uploaded files get loaded again by COPY INTO (new checksum).
-select trade_date, ticker, count(*) as copies
+-- Rows loaded more than once (rewritten partitions). stg_prices keeps the
+-- newest; this is just to see how often it happens.
+select trade_date, ticker, count(*) as copies, max(fetched_at) as newest_fetch
 from RAW.PRICES
 group by 1, 2
 having count(*) > 1
 order by 1 desc;
+
+-- Price rows with no fetch time can't be put back to as-traded prices.
+-- Expect 0 after the step 9 reload.
+select count(*) as rows_without_fetched_at
+from RAW.PRICES
+where fetched_at is null;
