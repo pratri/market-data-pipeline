@@ -1,10 +1,11 @@
 -- One row per company: sector, identifiers and latest reported figures.
 --
--- revenue_metric_applicable is there because banks don't report revenue
--- like everyone else. GS has zero revenue rows across 78 quarters, MS has
--- one. Adding bank tags would just produce a P/S for Goldman that can't be
--- compared to Costco's, so revenue ratios are nulled for Financials and
--- P/B is the ratio to use there.
+-- revenue_metric_applicable is there because banks and brokers don't report
+-- revenue like everyone else. GS has zero revenue rows across 78 quarters,
+-- MS has one, and what the rest report is revenue net of interest expense.
+-- A P/S built on that can't be compared to Costco's, so revenue ratios are
+-- nulled for them and P/B is the ratio to use. Payment networks, exchanges
+-- and asset managers (V, MA, SPGI, BLK) report normal revenue and keep it.
 
 with fundamentals as (
 
@@ -14,7 +15,13 @@ with fundamentals as (
 
 prices as (
 
-    select * from {{ ref('stg_prices') }}
+    select * from {{ ref('int_prices_daily') }}
+
+),
+
+shares as (
+
+    select * from {{ ref('int_market_cap_shares') }}
 
 ),
 
@@ -58,6 +65,14 @@ sectors as (
 
 ),
 
+-- banks and brokers, where "revenue" is net of interest expense
+bank_like as (
+
+    select column1 as ticker
+    from values ('JPM'), ('BAC'), ('WFC'), ('C'), ('GS'), ('MS'), ('SCHW'), ('AXP')
+
+),
+
 latest_fundamentals as (
 
     select
@@ -69,8 +84,6 @@ latest_fundamentals as (
         net_income          as latest_quarterly_net_income,
         total_assets        as latest_total_assets,
         stockholders_equity as latest_stockholders_equity,
-        shares_outstanding  as latest_shares_outstanding,
-        shares_basis        as latest_shares_basis,
         net_margin          as latest_net_margin,
         revenue_yoy_growth  as latest_revenue_yoy_growth,
 
@@ -114,6 +127,7 @@ latest_close as (
 
     select
         ticker,
+        trade_date,
         close_price as latest_close_price,
         row_number() over (partition by ticker order by trade_date desc) as rn
     from prices
@@ -131,13 +145,13 @@ select
     f.latest_quarterly_net_income,
     f.latest_total_assets,
     f.latest_stockholders_equity,
-    f.latest_shares_outstanding,
-    f.latest_shares_basis,
+    sh.shares_outstanding as latest_shares_outstanding,
+    sh.shares_basis       as latest_shares_basis,
     f.latest_net_margin,
     f.latest_revenue_yoy_growth,
 
     c.latest_close_price,
-    c.latest_close_price * f.latest_shares_outstanding as current_market_cap,
+    c.latest_close_price * sh.shares_outstanding as current_market_cap,
 
     p.first_trade_date,
     p.last_trade_date,
@@ -149,12 +163,9 @@ select
     rc.quarters_with_revenue,
     rc.quarters_derived,
 
-    -- sector based: no comparable revenue for Financials
-    case when coalesce(s.sector, '') = 'Financials' then false else true end
-        as revenue_metric_applicable,
+    b.ticker is null as revenue_metric_applicable,
 
-    -- coverage based: under 4 quarters of revenue means no TTM, whatever
-    -- the sector
+    -- under 4 quarters of revenue means no TTM
     case
         when rc.quarters_with_revenue < 4 then true else false
     end as insufficient_revenue_history,
@@ -166,8 +177,10 @@ select
     end as has_stale_fundamentals
 
 from latest_fundamentals f
-left join sectors s          on f.ticker = s.ticker
+left join sectors s           on f.ticker = s.ticker
+left join bank_like b         on f.ticker = b.ticker
 left join revenue_coverage rc on f.ticker = rc.ticker
 left join price_coverage p    on f.ticker = p.ticker
 left join latest_close c      on f.ticker = c.ticker and c.rn = 1
+left join shares sh           on sh.ticker = c.ticker and sh.trade_date = c.trade_date
 where f.rn = 1

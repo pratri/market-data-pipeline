@@ -8,7 +8,9 @@ sources:
 
     tables:
       - name: prices
-        description: Daily OHLCV, one row per ticker per trading day.
+        description: >
+          Daily OHLCV plus dividends and split ratios. A rewritten partition
+          is loaded again, so a ticker-day can appear more than once.
         columns:
           - name: trade_date
             description: >
@@ -22,11 +24,17 @@ sources:
           - name: close
             tests:
               - not_null
+          - name: fetched_at
+            description: >
+              UTC time the row was downloaded from Yahoo, or the file's S3
+              upload time for files written before the column existed. Yahoo
+              split-adjusts as of this moment.
 
       - name: fundamentals
         description: >
-          SEC XBRL facts, one row per company, metric and period. Holds every
-          snapshot, so downstream models filter to the latest.
+          SEC XBRL facts, one row per company, metric and period, from the
+          first 10-K/10-Q that reported it. Holds every snapshot, so
+          downstream models filter to the latest.
         columns:
           - name: ticker
             tests:
@@ -45,6 +53,7 @@ sources:
                     - shares_outstanding
                     - cash_and_equivalents
                     - operating_cash_flow
+                    - cover_shares_outstanding
           - name: period_end
             tests:
               - not_null

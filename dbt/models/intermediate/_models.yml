@@ -13,7 +13,7 @@ models:
       - name: period_end
         tests: [not_null]
       - name: filed_date
-        description: Latest filing date across the quarter's metrics.
+        description: Latest first-filing date across the quarter's metrics.
         tests: [not_null]
       - name: revenue
         description: >
@@ -27,14 +27,16 @@ models:
                 where: "revenue is not null"
       - name: shares_outstanding
         description: >
-          Share count in units. Under 1M gets nulled, since MCD reports in
-          millions and its market cap came out as $184,622.
+          Share count in units, as filed (not split-adjusted). Under 1M gets
+          nulled, since MCD reports weighted average shares in millions.
         tests:
           - dbt_utils.accepted_range:
               min_value: 1000000
               inclusive: true
               config:
                 where: "shares_outstanding is not null"
+      - name: shares_filed_date
+        description: Filing date of the share count, carried forward with it.
       - name: revenue_yoy_growth
         description: >
           Only set when the comparison quarter is about a year back.
@@ -46,6 +48,7 @@ models:
               max_value: 5
               config:
                 where: "revenue_yoy_growth is not null"
+                severity: warn
       - name: revenue_qoq_growth
         tests:
           - dbt_utils.accepted_range:
@@ -53,6 +56,7 @@ models:
               max_value: 5
               config:
                 where: "revenue_qoq_growth is not null"
+                severity: warn
       - name: revenue_source
         description: >
           as_reported is a standalone quarter from the filing, derived is the
@@ -66,7 +70,7 @@ models:
         description: >
           instant is a point-in-time count. weighted_average is the quarter's
           average, so market cap is approximate. carried_forward is the last
-          known count with no age limit (789 days old on average, 949 max).
+          known count with no age limit.
         tests:
           - accepted_values:
               values: ['instant', 'weighted_average', 'carried_forward']
@@ -77,14 +81,64 @@ models:
           combination_of_columns: [ticker, period_end]
 
   - name: int_prices_daily
-    description: Daily prices with returns and 20-day rolling stats.
+    description: >
+      Daily prices as traded, with total returns and 20-day rolling stats.
     columns:
       - name: trade_date
         tests: [not_null]
       - name: ticker
         tests: [not_null]
+      - name: close_price
+        description: The price it actually traded at, whatever Yahoo had adjusted it to.
+        tests: [not_null]
+      - name: split_adjusted_close_price
+        description: >
+          Close adjusted for every split and spinoff known now, like Yahoo's
+          chart. Not dividend adjusted.
+      - name: adjustment_factor
+        description: close_price / split_adjusted_close_price. 1 unless a split came later.
       - name: daily_return
-        description: Null on each ticker's first day.
+        description: >
+          Total return (price plus dividends) on the split-adjusted close.
+          Null on each ticker's first day.
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [trade_date, ticker]
+
+  - name: int_stock_splits
+    description: >
+      One row per split or spinoff adjustment in the loaded price history.
+    columns:
+      - name: split_ratio
+        description: Yahoo's price adjustment ratio.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false
+      - name: share_split_ratio
+        description: >
+          How much the share count changed. Null for a plain spinoff, which
+          moves the price but not the share count.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, split_date]
+
+  - name: int_market_cap_shares
+    description: >
+      Share count for market cap per ticker per day: the most recently filed
+      of the cover page count and the quarterly count, adjusted for later
+      splits.
+    columns:
+      - name: shares_outstanding
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 1000000
+              inclusive: true
+      - name: shares_basis
+        tests:
+          - accepted_values:
+              values: ['cover_page', 'instant', 'weighted_average', 'carried_forward']
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, trade_date]
