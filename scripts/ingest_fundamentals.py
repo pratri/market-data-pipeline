@@ -4,8 +4,11 @@ snapshot to S3.
 
 - A metric can show up under several us-gaap tags, so all candidate tags
   are read and merged.
-- The same period gets repeated in later filings. Only the latest filed
-  value per period is kept.
+- Every 10-Q/10-K repeats earlier periods as comparatives. Only the first
+  filing of each period is kept, so `filed` is when the number became
+  public and the value is what was originally reported.
+- Only 10-K/10-Q filings and their amendments are used. 8-K recasts and
+  proxy statements repeat old numbers months or years later.
 - SEC allows about 10 requests/sec, so calls are spaced out.
 
 Usage:
@@ -37,11 +40,32 @@ REQUEST_DELAY = 0.15     # ~6.7 req/sec
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 3
 
+# Originals before amendments when two filings land on the same day.
+FORM_RANK = {
+    "10-K": 0, "10-Q": 0, "10-KT": 0, "10-QT": 0,
+    "10-K/A": 1, "10-Q/A": 1, "10-KT/A": 1, "10-QT/A": 1,
+}
+
+# Tickers whose history is split across two SEC registrants after a holding
+# company reorganization. The ticker map only has the current CIK.
+PREDECESSOR_CIKS = {
+    "XOM": ["0000034088"],   # Exxon Mobil Corp, still files alongside the 2026 holdco
+    "BLK": ["0001364742"],   # BlackRock Finance, everything before Nov 2024
+}
+
+# Metrics where, if one filing tags the same period under several candidate
+# tags, the largest value wins instead of the first listed. Revenue tags
+# overlap in both directions: COP's Revenues (15.0bn) is its income statement
+# total and RevenueFromContractWithCustomer (13.3bn) is the ASC 606 part, but
+# BLK's FY2024 10-K has Revenues at 12.8bn under a RevenueFromContract total
+# of 20.4bn. A total can't be smaller than a piece of it.
+LARGEST_WINS = {"revenue"}
+
 METRIC_TAGS = {
     "revenue": [
+        "Revenues",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "RevenueFromContractWithCustomerIncludingAssessedTax",
-        "Revenues",
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
     ],
@@ -72,6 +96,13 @@ METRIC_TAGS = {
     ],
 }
 
+# Cover page share count. A real count dated a few weeks after quarter end,
+# on nearly every 10-Q/10-K. Multi-class companies only report it per class,
+# which companyfacts leaves out.
+DEI_METRIC_TAGS = {
+    "cover_shares_outstanding": ["EntityCommonStockSharesOutstanding"],
+}
+
 
 def get_user_agent() -> str:
     """SEC blocks requests without a name and email in the User-Agent.
@@ -80,7 +111,7 @@ def get_user_agent() -> str:
     """
     load_env()
     ua = os.environ.get("SEC_USER_AGENT")
-    if not ua or "example.com" in ua:
+    if not ua or "example.com" in ua or "your-email" in ua:
         raise SystemExit(
             "ERROR: SEC_USER_AGENT is not set.\n"
             "Add this to your .env file:\n"
@@ -128,28 +159,33 @@ def fetch_company_facts(session: requests.Session, cik: str, ua: str) -> dict | 
     return None
 
 
-def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
+def extract_metric(
+    facts: dict,
+    tag_candidates: list[str],
+    namespace: str = "us-gaap",
+    pick_largest: bool = False,
+) -> list[dict]:
     """Collect a metric's values across all candidate tags.
 
-    facts["facts"]["us-gaap"][TAG]["units"][UNIT] is a list of entries with
+    facts["facts"][namespace][TAG]["units"][UNIT] is a list of entries with
     start/end, val, fy, fp, form and filed.
 
     Companies switch tags over time. NVDA used
     RevenueFromContractWithCustomerExcludingAssessedTax until Jan 2022 and
     Revenues after, so stopping at the first tag with data lost four years
-    of NVDA revenue. When two tags report the same fact in the same filing,
-    the one listed first in METRIC_TAGS wins.
+    of NVDA revenue. When two tags report the same period in the same
+    filing, the one listed first wins, or the larger one if pick_largest.
     """
-    us_gaap = facts.get("facts", {}).get("us-gaap", {})
+    tags_in_namespace = facts.get("facts", {}).get(namespace, {})
 
     # same fact under two tags collapses to one row, different periods don't
     merged: dict[tuple, dict] = {}
 
     for priority, tag in enumerate(tag_candidates):
-        if tag not in us_gaap:
+        if tag not in tags_in_namespace:
             continue
 
-        units = us_gaap[tag].get("units", {})
+        units = tags_in_namespace[tag].get("units", {})
         unit_key = next(
             (u for u in ("USD", "shares", "USD/shares") if u in units),
             None,
@@ -160,6 +196,8 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
         for entry in units[unit_key]:
             if "end" not in entry or "val" not in entry:
                 continue
+            if entry.get("form") not in FORM_RANK:
+                continue
 
             key = (
                 entry.get("start"),
@@ -168,10 +206,14 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
                 entry.get("accn"),
             )
 
-            # lower number = earlier in the list = wins
             existing = merged.get(key)
-            if existing is not None and existing["_priority"] <= priority:
-                continue
+            if existing is not None:
+                if pick_largest:
+                    if abs(entry["val"]) <= abs(existing["value"]):
+                        continue
+                # lower number = earlier in the list = wins
+                elif existing["_priority"] <= priority:
+                    continue
 
             merged[key] = {
                 "_priority": priority,
@@ -195,40 +237,63 @@ def extract_metric(facts: dict, tag_candidates: list[str]) -> list[dict]:
 
 
 def dedupe_restatements(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep the latest filed value per (ticker, metric, period_start, period_end).
+    """Keep the first filing of each (ticker, metric, period_start, period_end).
 
-    period_start is in the key because Q2 and H1 share an end date but are
-    different facts.
+    Keeping the latest copy instead moved `filed` forward to whichever later
+    filing last repeated the number (up to two years), and the as-of join in
+    dbt then attached year-old quarters. Same-day ties go to originals over
+    amendments, then to the current CIK over a predecessor.
     """
     if df.empty:
         return df
 
     df = df.copy()
     df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
-    df = df.sort_values("filed")
+    df = df.dropna(subset=["filed"])
+    df["_form_rank"] = df["form"].map(FORM_RANK)
+    df = df.sort_values(["filed", "_form_rank", "_cik_rank"], kind="stable")
 
     return (
         df.drop_duplicates(
             subset=["ticker", "metric", "period_start", "period_end"],
-            keep="last",
+            keep="first",
         )
+        .drop(columns=["_form_rank", "_cik_rank"])
         .reset_index(drop=True)
     )
 
 
-def process_company(ticker: str, cik: str, facts: dict) -> pd.DataFrame:
+def process_company(ticker: str, facts_by_cik: list[tuple[str, dict]]) -> pd.DataFrame:
+    """Rows for one ticker. facts_by_cik is [(cik, facts)], current CIK first."""
     rows = []
-    for metric, tags in METRIC_TAGS.items():
-        for row in extract_metric(facts, tags):
-            row["ticker"] = ticker
-            row["cik"] = cik
-            row["metric"] = metric
-            rows.append(row)
+    for cik_rank, (cik, facts) in enumerate(facts_by_cik):
+        for namespace, metric_tags in (("us-gaap", METRIC_TAGS), ("dei", DEI_METRIC_TAGS)):
+            for metric, tags in metric_tags.items():
+                for row in extract_metric(facts, tags, namespace, metric in LARGEST_WINS):
+                    row["ticker"] = ticker
+                    row["cik"] = cik
+                    row["metric"] = metric
+                    row["_cik_rank"] = cik_rank
+                    rows.append(row)
 
     if not rows:
         return pd.DataFrame()
 
     return dedupe_restatements(pd.DataFrame(rows))
+
+
+def fetch_ticker(session: requests.Session, ticker: str, cik: str, ua: str) -> pd.DataFrame:
+    """Fetch and process one ticker, including any predecessor CIKs."""
+    facts_by_cik = []
+    for c in [cik, *PREDECESSOR_CIKS.get(ticker, [])]:
+        facts = fetch_company_facts(session, c, ua)
+        time.sleep(REQUEST_DELAY)
+        if facts is None:
+            print(f"    no facts returned for CIK {c}")
+            continue
+        facts_by_cik.append((c, facts))
+
+    return process_company(ticker, facts_by_cik)
 
 
 def main() -> None:
@@ -256,14 +321,7 @@ def main() -> None:
         cik = info["cik"]
         print(f"[{i}/{len(items)}] {ticker} (CIK {cik})")
 
-        facts = fetch_company_facts(session, cik, ua)
-        if facts is None:
-            print("    no facts returned")
-            failed.append(ticker)
-            time.sleep(REQUEST_DELAY)
-            continue
-
-        df = process_company(ticker, cik, facts)
+        df = fetch_ticker(session, ticker, cik, ua)
         if df.empty:
             print("    no matching metrics found")
             failed.append(ticker)
@@ -271,14 +329,14 @@ def main() -> None:
             print(f"    {len(df):,} rows across {df['metric'].nunique()} metrics")
             frames.append(df)
 
-        time.sleep(REQUEST_DELAY)
-
     if not frames:
         sys.exit("\nERROR: no fundamentals retrieved.")
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # dated key so older snapshots aren't overwritten
+    # Dated key so older snapshots aren't overwritten. dbt reads each
+    # ticker's latest snapshot, so a ticker that failed today keeps its
+    # previous data instead of disappearing.
     key = f"{S3_PREFIX}/snapshot_date={date.today()}/fundamentals.parquet"
     uri = write_parquet_to_s3(combined, key, bucket=bucket)
 

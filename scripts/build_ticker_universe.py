@@ -3,7 +3,10 @@ Builds data/ticker_cik_map.json (ticker -> zero-padded CIK).
 
 The companyfacts API takes CIKs, not tickers. Source is SEC's public
 https://www.sec.gov/files/company_tickers.json. SEC wants a name and email
-in the User-Agent.
+in the User-Agent, read from SEC_USER_AGENT in .env.
+
+Only the current CIK is stored. Tickers with a predecessor registrant are
+handled in ingest_fundamentals.PREDECESSOR_CIKS.
 """
 
 import json
@@ -12,10 +15,10 @@ from pathlib import Path
 
 import requests
 
-SEC_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
+sys.path.insert(0, str(Path(__file__).parent))
+from ingest_fundamentals import get_user_agent
 
-# your name and email
-USER_AGENT = "Pranav pranteja@gmail.com"
+SEC_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 
 OUTPUT_PATH = Path(__file__).parent.parent / "data" / "ticker_cik_map.json"
 
@@ -35,15 +38,9 @@ def fetch_sec_lookup() -> dict:
 
     SEC's JSON looks like {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
     """
-    if "your-email@example.com" in USER_AGENT:
-        sys.exit(
-            "ERROR: Set USER_AGENT to your real name and email before running.\n"
-            "The SEC blocks requests that don't identify the caller."
-        )
-
     response = requests.get(
         SEC_TICKER_URL,
-        headers={"User-Agent": USER_AGENT},
+        headers={"User-Agent": get_user_agent()},
         timeout=15,
     )
     response.raise_for_status()
