@@ -5,9 +5,10 @@ market_data:
   outputs:
     dev:
       type: snowflake
-      account: idc24001.us-east-1
-      user: pranteja
-      password: @@@No1gaadidha
+      account: "<account_locator>.<region>"
+      user: "<user>"
+      # quote it, YAML can't start a bare value with @ and a few other characters
+      password: "<password>"
       role: ACCOUNTADMIN
       database: MARKET_DATA
       warehouse: MARKET_WH

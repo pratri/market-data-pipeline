@@ -28,11 +28,11 @@ variable "my_ip_cidr" {
 variable "ec2_instance_type" {
   description = <<-EOT
     Instance type for the Airflow host.
-    t3.small (2 GB RAM) is the practical minimum for the multi-container
-    Airflow stack. t2.micro/t3.micro (1 GB) will OOM-kill containers.
+    t3.medium (4 GB RAM) is the minimum. On a t3.small the scheduler goes
+    unhealthy on the first scheduled run.
   EOT
   type        = string
-  default     = "t3.small"
+  default     = "t3.medium"
 }
 
 variable "ec2_key_name" {
