@@ -4,7 +4,7 @@ A batch pipeline that pulls daily stock prices and quarterly SEC filings,
 lands them in S3, loads them into Snowflake, and transforms them with dbt
 into a daily fact table with valuation metrics for 64 US large caps.
 
-Built to practice the modern data stack end to end: orchestration,
+I built this to practice the modern data stack end to end: orchestration,
 infrastructure as code, cloud storage, a warehouse, and transformation
 with tests.
 
@@ -220,7 +220,23 @@ a company is visible instead of looking like a valuation story.
 Don't average the per-company ratios. `AVG(pe_ratio)` drops every loss
 maker and lets one outlier carry the sector: on the last day of the sample
 Consumer Discretionary averaged 103 against a median of 21 and a
-cap-weighted 29.
+cap-weighted 29. Same reason the published dashboard shows ticker counts
+next to the sector averages: a 15-company average and a 4-company average
+aren't standing on the same footing, and the chart shouldn't imply they are.
+
+**[Live dashboard on Tableau Public](https://public.tableau.com/app/profile/pranav.tripuraneni/viz/Book1_17892343778990/SectorValuationComparisonUSLarge-CapEquities)**
+
+![Sector valuation dashboard](docs/dashboard.png)
+
+The published version runs off a flat export (`tableau/market_metrics.csv`,
+16,000 rows across the 64 tickers) instead of a live Snowflake connection,
+since Tableau Public doesn't support one. Financials are excluded from the
+P/S and net margin views for the reason above; P/B is unaffected and
+includes them. A couple of tickers (MCD, ABBV) show a blank P/B because they
+carry negative stockholders' equity, which is an accounting fact about
+those companies, not a data gap.
+
+Packaged workbook: [`tableau/sector_valuation_dashboard.twbx`](tableau/sector_valuation_dashboard.twbx)
 
 ## Stack
 
