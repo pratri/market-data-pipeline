@@ -100,114 +100,49 @@ multiplied by any split between their filing and the trade date.
 ## Things I found by looking at the data
 
 The tests all passed on a version of this where 98% of the valuation
-ratios were null, and again on a version where a third of the fact table
+ratios were null, and on a later version where a third of the fact table
 carried year-old fundamentals. Tests check what you thought to check.
-These came from querying the output and noticing the numbers were wrong.
-The queries are in `audit/warehouse_audit.sql`.
+These came from querying the output and noticing the numbers were wrong;
+the queries are in `audit/warehouse_audit.sql`.
 
-**Filed dates drifted forward.** Every 10-Q and 10-K repeats earlier
-periods as comparatives, and ingestion kept the most recently filed copy
-of each number. So Apple's June 2024 quarter had a filed date of August
-2025, when the next year's 10-Q repeated it, and the as-of join couldn't
-use it until then. On 2025-09-11 AAPL showed $85.8bn of revenue (June
-2024) instead of $94.0bn (June 2025). From October 2025 to May 2026 it
-carried a 2023 quarter. 37% of fact table rows had fundamentals over a
-year old, and `days_since_filing` looked normal the whole time because it
-was computed from the same wrong dates. Ingestion now keeps the first
-filing of each number, and two singular tests check the attached quarter
-is the newest one available and not stale.
+The expensive one: ingestion kept whichever filing most recently repeated
+a number, and every 10-Q or 10-K restates prior quarters as comparatives,
+so the filed date kept drifting forward. Apple's June 2024 quarter ended
+up dated August 2025, and on 2025-09-11 the fact table showed $85.8bn of
+revenue instead of the real $94.0bn. From October 2025 to May 2026 it was
+carrying a 2023 quarter entirely, 37% of rows were over a year stale, and
+the staleness test looked fine the whole time because it was computed off
+the same wrong dates. Fixed by keeping the first filing of each number
+instead of the latest.
 
-**A 10-for-1 split made Netflix a $50bn company.** Yahoo's history was
-split-adjusted all the way back, so September 2025 closes were ~$120,
-multiplied by the ~425M pre-split shares from the 10-Q. Market cap was 10x
-too low for ten months, and P/E sat around 5. Yahoo also books some
-spinoffs as fractional "splits" (Honeywell 1.061 in Oct 2025, S&P Global
-1.057 in Jul 2026), which change the price but not the share count, and
-Honeywell's June 2026 event was a 1-for-2 reverse split and a spinoff
-rolled into one 0.9535 ratio. `int_stock_splits` works out which part
-changes the share count by comparing cover page counts either side.
+Netflix looked like a $50bn company for ten months because Yahoo's price
+history is split-adjusted retroactively: its ~$120 September 2025 close
+got multiplied by the ~425M pre-split share count still sitting in the
+10-Q, and P/E sat around 5. Working out which corporate actions actually
+change share count, versus which just move the price (a couple of Yahoo's
+"splits" are actually spinoffs), meant comparing cover page counts on
+either side of each event.
 
-**Ingestion now records when each price row was fetched.** With daily
-incremental loads, a partition written before a split is on a different
-basis from one written after. Knowing the fetch time is what makes it
-possible to undo Yahoo's adjustment. I checked this by loading the same
-year of prices three ways (one backfill, simulated daily fetches, and a
-mix with duplicate rows) and getting identical output.
-
-**Share counts: cover page first.** The front page of every 10-Q/10-K has
-an actual share count (`dei:EntityCommonStockSharesOutstanding`) dated a
-few weeks after quarter end. The model uses whichever of that and the
-quarterly count was filed more recently. This also fixed McDonald's,
-which files weighted average shares in millions (711.1), which had made
-its market cap $223,889.
-
-**But the cover page only lists one share class.** Mastercard's says 122.5M
-against ~876M shares actually outstanding, Visa's says 469M against ~1.87B
-as-converted, and UPS leaves out Class A. Used blindly those divide market
-cap by 7, 4 and 1.2. A cover count is now only used when a us-gaap share
-count in the same filing agrees with it within 10%, which is also what
-vouches for McDonald's in-millions figure. I checked the surviving counts
-against Yahoo's for all 64 tickers: 61 agree within 0.2%, and the three
+McDonald's had a market cap of $223,889 at one point, because it files
+weighted-average shares in millions and the model read that as a raw
+share count. Fixing that properly meant not trusting cover page counts
+blindly either: Mastercard's cover page only lists one share class,
+122.5M against roughly 876M actually outstanding, and Visa and UPS have
+the same problem. A cover count is now only used when a separate us-gaap
+count in the same filing agrees with it within 10%. Checked against
+Yahoo for all 64 tickers afterward: 61 agree within 0.2%, and the three
 that don't are exactly MA, V and UPS.
 
-**Companies switch XBRL tags mid-history.** NVDA reported revenue under
-`RevenueFromContractWithCustomerExcludingAssessedTax` until January 2022
-and has used `Revenues` ever since. My extraction returned on the first
-tag that had *any* data, so NVDA got nothing after 2022. Same bug in
-mirror image for CAT, which had revenue but no net income, and for PFE,
-GOOGL, CVS and GE. The fix reads every candidate tag and merges them.
+Banks don't report revenue the way other companies do. Goldman Sachs has
+zero revenue rows across 78 quarters, so price-to-sales and net margin
+exclude Financials entirely; price-to-book still works for them and
+stays populated.
 
-**Revenue tags overlap in both directions.** When one filing tags two
-revenue concepts for the same quarter, a fixed priority is wrong for
-someone. ConocoPhillips' `Revenues` ($15.0bn) is the income statement
-total and `RevenueFromContractWithCustomer` ($13.3bn) is part of it.
-BlackRock's FY2024 10-K has it the other way round. A total can't be
-smaller than one of its parts, so the larger value wins. Model revenue
-for Q2 2025 now matches the headline figure exactly for all 21 companies I
-checked by hand.
-
-**Differencing across a tag switch.** Many filers only report
-year-to-date, so standalone quarters are derived (Q2 = H1 − Q1, Q4 =
-FY − 9M). MA reported Q1–Q3 2021 under `Revenues` and the full year under
-`SalesRevenueNet`, and the difference was -2.589bn of "Q4 revenue". I first
-fixed that by never differencing across tags, which quietly lost every Q4
-where a company switched to an equivalent tag at year end (NVDA, GOOGL,
-AVGO), and a year of TTM with each. Cross-tag quarters are now allowed but
-have to land within 0.5–2x of the quarters around them.
-
-**GE's 977% growth wasn't GE.** GE's 10-Ks tag a 91-day `Revenues` fact of
-$2.585bn for Q4 2015 and $2.649bn for Q4 2016, against ~$30bn quarters
-either side. Whatever line that is, it isn't total revenue, and "as
-reported beats derived" trusted it. But around spinoffs it's the derived
-number that's wrong: GE's H1 2024 excluded Vernova while its Q1 didn't, so
-Q2 came out at $2bn. Now, when the two disagree by more than 20%, whichever
-is closer to the neighbouring quarters wins, and a derived quarter wildly
-out of line with its neighbours (IBM's $3.3bn Q4 2021 around the Kyndryl
-spinoff) is dropped.
-
-**Fiscal quarters aren't always 13 weeks.** Costco and PepsiCo have 16-week
-fourth quarters, which fell outside the 80–100 day bucket, and their 24- and
-36-week half and nine-month periods fell outside theirs. Neither company
-ever got a Q4, so neither ever had a P/E or P/S.
-
-**Holding company reorganizations split history across CIKs.** XOM's
-ticker points at ExxonMobil Holdings Corp, which had one 10-Q; Exxon Mobil
-Corp still files under the old CIK. BlackRock did the same in 2024. Both
-predecessor CIKs are now pulled and merged, and XOM went from no market
-cap for 11 months of the dashboard window to full coverage.
-
-**Price partitions could be permanently incomplete.** One failed batch left
-2026-08-28 with 16 of 64 tickers, and `--skip-existing` would never
-revisit it. It now adds missing tickers to existing dates, and stg_prices
-keeps the newest copy when a rewritten file gets loaded twice.
-
-**Banks don't report revenue.** Goldman Sachs has zero revenue rows across
-78 quarters. Morgan Stanley has one. What banks, brokers and AmEx report
-is revenue net of interest expense, and a price-to-sales ratio on that
-means nothing next to Costco's. They're excluded from revenue ratios and
-price-to-book is populated. This used to cover all of Financials, which
-also blanked P/S for Visa, Mastercard, S&P Global and BlackRock, who report
-normal revenue.
+A few smaller things broke too: GE tagged a $2.585bn line for Q4 2015
+that isn't actually total revenue, NVDA silently lost two years of
+revenue when it switched XBRL tags mid-history, and Costco and PepsiCo's
+16-week fourth quarters fell outside the window used to classify filing
+periods, so I widened it.
 
 ## For the dashboard
 
@@ -305,49 +240,30 @@ permanent red X on the repo.
 
 ## Known limitations
 
-**Values are as originally reported.** Ingestion keeps the first filing of
-each number, which is what was known at the time. A later restatement is
-ignored. Around a spinoff, quarters before and after sit on different
-bases, so TTM figures that straddle one mix them (Honeywell's P/E right
-after its 2026 separation includes earnings from the business it spun off).
-
-**SEC's companyfacts API is missing some filings.** Citigroup's 2026
-10-Qs and S&P Global's FY2024 10-K were filed with XBRL but weren't in the
-API in September 2026. Citi's fundamentals go stale (the
-`assert_fundamentals_not_stale` test warns) and S&P Global has no TTM for
-five months.
-
-**Visa has no market cap.** It only reports share counts per class
-(A, B-1, B-2, C), and companyfacts leaves out anything broken down by
-class. GOOGL and META have the same problem with cover page counts but
-fall back to weighted average shares.
-
-**Splits before the loaded price history aren't known**, so share counts
-filed more than 400 days before a trade date aren't used.
-
-**A fetch on a split's ex-date is assumed to be before Yahoo applied it.**
-True for the 6am DAG. A manual run later that day could double-adjust;
-`assert_no_split_sized_returns` would catch it.
-
-**Net income is as reported, one-offs included.** Alphabet's Q2 2026 10-Q
-tags $112.2bn of net income on $119.8bn of revenue, against $40.8bn of
-operating income, so about $71bn of it is non-operating. Trailing P/E and
-net margin move with that, which is what the filings say but not what the
-business earned.
-
-**Sector mapping is hardcoded.** 64 tickers in a `values` list. A real
-system would pull SIC codes from SEC's submissions endpoint or use GICS.
-
-**yfinance is unofficial.** It scrapes Yahoo rather than using a licensed
-API, so it rate limits and breaks when Yahoo changes their site. There's
-retry logic with exponential backoff, but it's a real fragility.
-
-**Weighted-average share counts make market cap approximate** for the
-few companies without a cover page count. `shares_basis` tells you which
-rows those are.
-
-**Single-node deployment.** LocalExecutor on one EC2 box. Fine for two
-DAGs and 64 tickers, not what you'd run for anything real.
+- Values are as originally reported. Ingestion keeps the first filing of
+  each number, so a later restatement is ignored. Around a spinoff,
+  quarters before and after sit on different bases, so a TTM figure that
+  straddles one mixes both (Honeywell's P/E right after its 2026
+  separation includes earnings from the business it spun off).
+- SEC's companyfacts API is missing some filings. Citigroup's 2026 10-Qs
+  and S&P Global's FY2024 10-K have XBRL but weren't in the API as of
+  September 2026, so Citi's fundamentals go stale and S&P Global has no
+  TTM for five months.
+- Visa has no market cap. It only reports share counts per class, and
+  companyfacts leaves out anything broken down by class. GOOGL and META
+  have the same cover page problem but fall back to weighted average
+  shares, and splits before the loaded price history aren't known, so
+  share counts filed more than 400 days before a trade date aren't used.
+- Net income is as reported, one-offs included. Alphabet's Q2 2026 10-Q
+  tags $112.2bn of net income on $119.8bn of revenue against $40.8bn of
+  operating income, so trailing P/E and net margin move with
+  non-operating items too.
+- Sector mapping is a hardcoded list of 64 tickers rather than pulled
+  from SEC or GICS.
+- yfinance is an unofficial scraper. It rate limits and breaks when
+  Yahoo changes their site.
+- Single node deployment: LocalExecutor on one EC2 box, fine for two
+  DAGs and 64 tickers, not what you'd run for anything real.
 
 ## Running it
 
@@ -388,43 +304,30 @@ supplies credentials automatically), and `docker compose up -d`.
 
 Things that cost me time on the box and aren't obvious from the docs.
 
-**A t3.small can't run this.** 2 GB isn't enough for Airflow 3's four
-services plus a task subprocess. It came up fine and then the first
-scheduled run hung: the scheduler went unhealthy, tasks failed with
-`httpx.ConnectError: Connection refused` trying to reach the API server,
-and the scheduler couldn't find the DAG in `serialized_dag`. All of it
-traced back to the box sitting at ~300 MB available with half a gig in
-swap. t3.medium (4 GB) is the floor, and the Terraform default.
+- A t3.small won't run this. 2 GB isn't enough for Airflow 3's four
+  services plus a task subprocess; the scheduler goes unhealthy and
+  tasks fail with connection refused errors once the box runs out of
+  memory. t3.medium (4 GB) is the floor, and the Terraform default.
+- Airflow 3 workers talk to the API server over HTTP now instead of
+  writing to the database directly, so
+  `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` has to point at the
+  apiserver container, or the worker resolves to localhost and fails.
+- Workers also need a shared `AIRFLOW__API_AUTH__JWT_SECRET`. Without
+  it, every container generates its own and the signature never
+  verifies, so tasks sit in `queued` forever behind a misleading error
+  about the DAG not being found.
+- Docker creates missing mount directories as root, so create and chown
+  the logs directory before starting, or the dag-processor silently
+  fails to write logs and parses nothing:
 
-**Airflow 3 workers need the API server URL.** Tasks talk back over HTTP
-now instead of writing to the database directly, so
-`AIRFLOW__CORE__EXECUTION_API_SERVER_URL` has to point at the apiserver
-container. Without it the worker resolves to localhost and gets
-connection refused.
+  ```bash
+  mkdir -p logs && sudo chown -R 1000:0 logs
+  ```
 
-**And a shared JWT secret.** Workers authenticate to the API server with
-a signed token. If `AIRFLOW__API_AUTH__JWT_SECRET` isn't set, every
-container generates its own on startup, so the signature never verifies
-and tasks sit in `queued` forever. The error is
-`Invalid auth token: Signature verification failed`, buried in a
-tenacity retry traceback, alongside a misleading
-`not found in serialized_dag table` that sends you looking at DAG
-parsing instead of auth.
+- Airflow 3 replaced the old user table with SimpleAuthManager, so
+  there's no admin/admin login. The generated password is in
+  `$AIRFLOW_HOME/simple_auth_manager_passwords.json.generated`:
 
-**Create and chown the logs directory before starting.** Docker creates
-missing mount directories as root, so the dag-processor can't write its
-per-file logs and silently parses nothing. `airflow dags list` just
-returns "No data found" with no import errors to explain it.
-
-```bash
-mkdir -p logs && sudo chown -R 1000:0 logs
-```
-
-**Login isn't admin/admin.** Airflow 3 replaced the old user table with
-SimpleAuthManager, so `airflow users create` doesn't exist unless you
-install and configure the FAB provider. The generated password is in
-`$AIRFLOW_HOME/simple_auth_manager_passwords.json.generated`:
-
-```bash
-docker compose exec apiserver cat /opt/airflow/simple_auth_manager_passwords.json.generated
-```
+  ```bash
+  docker compose exec apiserver cat /opt/airflow/simple_auth_manager_passwords.json.generated
+  ```
