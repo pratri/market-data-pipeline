@@ -1,15 +1,12 @@
 -- One row per sector per trading day, for the sector comparison dashboard.
 --
--- Aggregate ratios rather than averages of ratios. AVG(pe_ratio) drops every
--- loss-making company and lets one outlier carry the sector: Consumer
--- Discretionary averaged 103 against a median of 22. Cap-weighted P/E is
--- total market cap over total TTM earnings, loss makers included, which is
--- what a sector multiple actually means. Medians are there for the
--- "typical company" view.
+-- Aggregate ratios, not averages of ratios. AVG(pe_ratio) drops loss makers
+-- and one outlier can carry the sector (Consumer Discretionary averaged 103
+-- vs a median of 22). Cap-weighted P/E is total market cap over total TTM
+-- earnings, loss makers included. Medians are for the typical company.
 --
--- companies_missing_market_cap keeps the gaps visible. A sector total that
--- silently leaves someone out (Visa has no share count in SEC's data) looks
--- like a valuation story instead of a coverage problem.
+-- companies_missing_market_cap shows when a sector total is missing someone
+-- (Visa has no share count in SEC's data).
 
 with daily as (
 

@@ -1,4 +1,4 @@
-# Copy to ~/.dbt/profiles.yml (C:\Users\Pranav\.dbt\profiles.yml on Windows).
+# Copy to ~/.dbt/profiles.yml (%USERPROFILE%\.dbt\profiles.yml on Windows).
 
 market_data:
   target: dev

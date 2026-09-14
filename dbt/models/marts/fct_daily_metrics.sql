@@ -1,15 +1,11 @@
 -- Daily prices joined to the latest fundamentals filed on or before each
 -- trade date.
 --
--- The join is on filed date, not period end. Q2 ends June 30 but isn't
--- reported until August, so joining on period end would put earnings into
--- July rows before anyone had them (lookahead bias). Ingestion keeps the
--- first filing of each number, so filed date really is when it became
--- public, and values are as originally reported.
+-- Joined on filed date, not period end, to avoid lookahead bias. filed is
+-- the first filing of each number.
 --
--- close_price is the price the stock actually traded at, and share counts
--- are adjusted for any split since they were filed, so market cap is right
--- on both sides of a split (int_prices_daily, int_market_cap_shares).
+-- close_price is as traded and share counts are split-adjusted since filing
+-- (int_prices_daily, int_market_cap_shares).
 --
 -- Revenue ratios are nulled where revenue isn't comparable, see
 -- dim_companies.

@@ -8,9 +8,7 @@
 use database MARKET_DATA;
 
 
--- ===========================================================================
 -- 1. Is each trading day using the right quarter?
--- ===========================================================================
 
 -- 1a. Age of the attached quarter by month. A large cap's latest quarter
 -- shouldn't be much more than ~150 days old.
@@ -68,9 +66,7 @@ group by 1
 order by 1;
 
 
--- ===========================================================================
 -- 2. Coverage holes that skew sector aggregates
--- ===========================================================================
 
 -- 2a. Tickers missing market cap, P/E or P/S on many days.
 -- Expect: V (no share count in SEC data), INTC and BA (losses, so no P/E),
@@ -143,9 +139,7 @@ having count(distinct ticker) < 64
 order by 1;
 
 
--- ===========================================================================
 -- 3. Market cap
--- ===========================================================================
 
 -- 3a. Around NFLX's 10-for-1. Expect close ~$1,112 then ~$110 with market cap
 -- steady at ~$470bn. Was: ~$52bn in Sep 2025.
@@ -208,9 +202,7 @@ where prev_shares > 0
 order by period_end desc;
 
 
--- ===========================================================================
 -- 4. Revenue quality
--- ===========================================================================
 
 -- 4a. Four quarters vs the reported annual figure. Differences of a few
 -- percent are expected around spinoffs (quarters as originally reported,
@@ -268,9 +260,7 @@ where ticker in ('AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NVDA',
 order by ticker;
 
 
--- ===========================================================================
 -- 5. Tableau: sector aggregates
--- ===========================================================================
 
 -- mart_sector_daily is built for this. Cap-weighted ratios include loss
 -- makers, medians show the typical company, and companies_missing_market_cap
@@ -310,9 +300,7 @@ qualify companies_with_market_cap is distinct from
 order by trade_date;
 
 
--- ===========================================================================
 -- 6. Load hygiene
--- ===========================================================================
 
 -- Snapshot completeness. Each ticker reads its own newest snapshot, so a
 -- short snapshot doesn't drop anyone, but it's worth knowing about.

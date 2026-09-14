@@ -1,14 +1,8 @@
-"""Build the dbt models on DuckDB against fixture data and check the output.
+"""Build the dbt models on DuckDB over tests/fixtures/ (21 tickers) and check the output.
 
-`dbt parse` in CI resolves refs and Jinja but never runs the SQL, so a model
-can be wrong in every way that matters and still pass. This builds all of
-them over a small fixture (21 tickers pulled from SEC and Yahoo, in
-tests/fixtures/), runs the tests declared in the .yml files and in
-dbt/tests/, then checks values that have a known right answer.
-
-It is not Snowflake. The SQL is rewritten where the two differ (see
-translate), so this catches logic and value regressions, not dialect
-problems. `sqlfluff parse` covers some of the rest.
+Runs the .yml and dbt/tests/ tests, then checks some values with a known
+answer. SQL is rewritten where DuckDB and Snowflake differ (see translate),
+so this won't catch dialect problems.
 
     python tests/run_models_duckdb.py
 """

@@ -1,15 +1,8 @@
 -- Daily prices as traded, plus returns and 20-day rolling stats.
---
--- Yahoo adjusts every earlier close for splits (and some spinoffs) as of
--- the day the history is downloaded. Rows fetched on different days end up
--- on different bases: a partition written before NFLX's 10-for-1 has
--- ~$1,200 closes, one written after has ~$120 for the same day. SEC share
--- counts are as of their filing date, so neither matches them reliably.
---
--- Each row is put back to the price it actually traded at by undoing the
--- adjustments Yahoo had already applied when it was fetched. Market cap
--- uses that price. Returns use split_adjusted_close_price, which applies
--- every known adjustment, so split and spinoff days don't look like crashes.
+-- Yahoo split-adjusts history as of the download, so partitions fetched on
+-- different days are on different bases (NFLX ~$1,200 vs ~$120 for the same
+-- day). Each row is un-adjusted back to its traded price for market cap.
+-- Returns use split_adjusted_close_price so split days don't look like crashes.
 
 with prices as (
 

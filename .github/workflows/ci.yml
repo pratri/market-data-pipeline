@@ -132,10 +132,8 @@ jobs:
       - name: Install sqlfluff
         run: pip install sqlfluff
 
-      # Fails on SQL Snowflake can't parse: typos, unbalanced brackets, a
-      # clause in the wrong dialect. It won't catch a function that exists
-      # elsewhere but not in Snowflake, so it's a floor, not a guarantee.
-      # Config (including the ref/source stubs) is in .sqlfluff.
+      # catches Snowflake syntax errors, not missing functions.
+      # config and ref/source stubs are in .sqlfluff
       - name: Parse models
         run: sqlfluff parse dbt/models
 

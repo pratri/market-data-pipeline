@@ -1,6 +1,6 @@
 -- One row per company per quarter.
 --
--- Everything below was found by checking actual output values:
+-- Notes:
 --   1. Q2 and H1 share an end date, so flows are split by period length
 --      or revenue gets double counted.
 --   2. Lots of filers only report YTD (Q1, H1, 9M, FY). Standalone
@@ -52,18 +52,11 @@ flows_as_reported as (
 
 ),
 
--- A YTD series is rows sharing period_start: Q1, H1, 9M and FY all start on
--- the first day of the fiscal year. Keying on period_start handles odd
--- fiscal years (AVGO ends Nov, INTU Jul, DIS Sep).
---
--- Companies switch tags between the 9M and the FY fairly often, usually for
--- the same number: NVDA's FY2021 10-K used RevenueFromContractWithCustomer
--- after three 10-Qs of Revenues, AVGO's FY2024 10-K used NetIncomeLoss after
--- ProfitLoss. Refusing to difference across tags lost those Q4s and a year
--- of TTM with them. But a switch can also be to a different concept: MA's
--- 2021 FY under SalesRevenueNet gave -2.589bn of Q4 revenue. So cross-tag
--- quarters are allowed but flagged, and flows_checked holds them to a
--- tighter test.
+-- A YTD series is rows sharing period_start (Q1, H1, 9M, FY), which handles
+-- odd fiscal years (AVGO ends Nov, INTU Jul, DIS Sep). Companies often switch
+-- tags between the 9M and FY for the same number (NVDA FY2021, AVGO FY2024),
+-- so differencing across tags is allowed but flagged, and flows_checked tests
+-- those harder (MA's 2021 FY gave -2.589bn of Q4 revenue).
 cumulative_series as (
 
     select
@@ -163,17 +156,11 @@ as_reported_neighbors as (
 
 ),
 
--- As-reported beats derived when both exist, unless they disagree by more
--- than 20%. Then whichever is closer to the reported quarters either side
--- wins, because either one can be the bad number:
---   GE's 10-Ks tag a 91-day Revenues fact of $2.585bn for Q4 2015 (and
---   $2.649bn for Q4 2016) against ~$30bn quarters around it. That line isn't
---   total revenue, and it made Q1 look like 977% QoQ growth. Derived wins.
---   Around a spinoff it goes the other way: the FY or H1 figure is restated
---   without the spun-off business and the earlier YTD figure isn't, so the
---   difference is too small (GE Q2 2024 at Vernova, JNJ Q3 2023 at Kenvue,
---   HON Q4 2025 at Solstice). As-reported wins.
--- With no neighbours to compare against, as-reported wins.
+-- Reported beats derived unless they differ by more than 20%, then whichever
+-- is closer to the quarters either side wins. GE tags a $2.585bn line that
+-- isn't total revenue for Q4 2015 (derived wins). Around spinoffs the FY is
+-- restated but earlier YTD isn't (GE 2024, JNJ 2023, HON 2025), so reported
+-- wins. With no neighbours, reported wins.
 flows_paired as (
 
     select

@@ -7,17 +7,17 @@
 
 variable "snowflake_iam_user_arn" {
   description = <<-EOT
-    STORAGE_AWS_IAM_USER_ARN from `DESC INTEGRATION s3_int` in Snowflake.
+    STORAGE_AWS_IAM_USER_ARN from `DESC INTEGRATION S3_MARKET_INT` in Snowflake.
     Placeholder on the first apply; fill in and re-apply after creating
     the integration.
   EOT
   type        = string
-    default     = "arn:aws:iam::742031403615:root"
+  default     = "arn:aws:iam::742031403615:root"
 }
 
 variable "snowflake_external_id" {
   description = <<-EOT
-    STORAGE_AWS_EXTERNAL_ID from `DESC INTEGRATION s3_int` in Snowflake.
+    STORAGE_AWS_EXTERNAL_ID from `DESC INTEGRATION S3_MARKET_INT` in Snowflake.
     Placeholder on the first apply.
   EOT
   type        = string
