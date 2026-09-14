@@ -155,7 +155,7 @@ jobs:
           cache: 'pip'
 
       - name: Install
-        run: pip install duckdb pandas pyarrow pyyaml
+        run: pip install duckdb pandas pyarrow pyyaml requests boto3
 
       # Extraction rules that the fixtures can't cover, because the fixtures
       # are what extraction already produced.
