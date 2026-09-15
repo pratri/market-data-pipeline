@@ -11,6 +11,12 @@ sources:
         description: >
           Daily OHLCV plus dividends and split ratios. A rewritten partition
           is loaded again, so a ticker-day can appear more than once.
+        # weekday DAG, so a normal weekend is 3 days old
+        config:
+          loaded_at_field: fetched_at
+          freshness:
+            warn_after: {count: 4, period: day}
+            error_after: {count: 7, period: day}
         columns:
           - name: trade_date
             description: >
@@ -35,6 +41,12 @@ sources:
           SEC XBRL facts, one row per company, metric and period, from the
           first 10-K/10-Q that reported it. Holds every snapshot, so
           downstream models filter to the latest.
+        # weekly DAG, loaded_at is set by COPY INTO
+        config:
+          loaded_at_field: loaded_at
+          freshness:
+            warn_after: {count: 8, period: day}
+            error_after: {count: 15, period: day}
         columns:
           - name: ticker
             tests:

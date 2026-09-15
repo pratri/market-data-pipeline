@@ -32,7 +32,7 @@ models:
       - name: days_since_filing
         description: >
           Trade date minus filing date. Negative would mean lookahead. It
-          can't catch a stale quarter, tests/assert_attached_quarter_is_current
+          can't catch a stale quarter, dbt/tests/assert_attached_quarter_is_latest_filed.sql
           does that.
         tests:
           - dbt_utils.accepted_range:

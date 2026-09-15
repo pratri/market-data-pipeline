@@ -9,8 +9,9 @@ __pycache__/
 .env
 *.pem
 
-# Data (belongs in S3, not git)
-data/
+# Data (belongs in S3, not git). The ticker map is small and the DAGs need it.
+data/*
+!data/ticker_cik_map.json
 
 # dbt
 dbt/target/

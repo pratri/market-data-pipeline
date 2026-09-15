@@ -21,7 +21,8 @@ SEC EDGAR ──────┘         │              partitioned      COPY I
 
 Two Python scripts do the ingestion. One pulls daily OHLCV, dividends and
 split ratios from Yahoo for a fixed list of 64 tickers, and the other pulls
-XBRL company facts from SEC EDGAR. Both write Parquet to S3.
+XBRL company facts (the tagged numbers in 10-Ks and 10-Qs) from SEC EDGAR.
+Both write Parquet to S3.
 
 Airflow 3 runs in Docker on a t3.medium. Prices run weekday mornings before
 the open. Fundamentals run on Sundays, since SEC data only changes quarterly
@@ -36,9 +37,10 @@ company SEC didn't return one week keeps last week's data.
 Snowflake loads from an external stage with `COPY INTO`, reading the bucket
 directly through a cross-account IAM role.
 
-dbt has staging, intermediate and marts layers with 63 tests: 58 generic
-and 5 singular tests in `dbt/tests/` that check actual values, like
-split-sized returns, stale fundamentals and missing price dates.
+dbt has staging, intermediate and marts layers with 64 tests: 58 generic
+and 6 singular tests in `dbt/tests/` that check actual values, like
+split-sized returns, stale fundamentals and missing price dates. Both
+sources have freshness checks (`dbt source freshness`).
 
 Terraform manages the S3 bucket, both IAM roles, the EC2 instance and its
 security group, so `terraform destroy` removes everything when the trial
@@ -46,10 +48,28 @@ credits run out.
 
 ### dbt model lineage
 
-![dbt lineage](docs/lineage-graph.png)
-
-(The screenshot is from before `int_stock_splits`, `int_market_cap_shares`
-and `mart_sector_daily` were added.)
+```mermaid
+flowchart LR
+    raw_prices[(raw.prices)] --> stg_prices
+    raw_fundamentals[(raw.fundamentals)] --> stg_fundamentals
+    stg_prices --> int_stock_splits
+    stg_fundamentals --> int_stock_splits
+    stg_prices --> int_prices_daily
+    int_stock_splits --> int_prices_daily
+    stg_fundamentals --> int_fundamentals_quarterly
+    stg_fundamentals --> int_market_cap_shares
+    int_fundamentals_quarterly --> int_market_cap_shares
+    int_prices_daily --> int_market_cap_shares
+    int_stock_splits --> int_market_cap_shares
+    int_fundamentals_quarterly --> dim_companies
+    int_market_cap_shares --> dim_companies
+    int_prices_daily --> dim_companies
+    int_fundamentals_quarterly --> fct_daily_metrics
+    int_market_cap_shares --> fct_daily_metrics
+    int_prices_daily --> fct_daily_metrics
+    dim_companies --> fct_daily_metrics
+    fct_daily_metrics --> mart_sector_daily
+```
 
 ### Airflow
 
@@ -69,9 +89,11 @@ fundamentals are joined to prices on period end, every July row gets a P/E
 computed from earnings nobody knew about yet. That's lookahead bias.
 
 So the join is as-of filing date: for each trading day, take the newest
-quarter whose numbers were all filed on or before that day. At first I had
-a test that `days_since_filing` is never negative and assumed that covered
-it. It didn't (see the first finding below).
+quarter whose numbers were all filed on or before that day. Trailing
+twelve month (TTM) figures also wait until all four quarters in the window
+were public. At first I had a test that `days_since_filing` is never
+negative and assumed that covered it. It didn't (see the first finding
+below).
 
 ### Filtering flow metrics by period duration
 
@@ -128,6 +150,13 @@ Banks and brokers don't report revenue like other companies. Goldman Sachs
 has zero revenue rows across 78 quarters, so price-to-sales is left null for
 the eight of them (JPM, BAC, WFC, C, GS, MS, SCHW, AXP). The other Financials
 report revenue normally. Price-to-book works for all of them.
+
+The TTM had its own version of the same problem. The join only checked the
+latest quarter, but an earlier quarter in the window could come from a
+later filing. Honeywell only tagged its Q4 2024 revenue on its own in the
+FY2025 10-K (February 2026), so 178 trading days in 2025 used that 2026
+number. Now the number filed first wins when both versions are close, and
+TTM metrics are null until every quarter in the window was public.
 
 A few smaller things broke too: GE tagged a $2.585bn line for Q4 2015 that
 isn't total revenue, NVDA lost four years of revenue when it switched XBRL
@@ -198,8 +227,9 @@ resolves refs and Jinja and never runs the SQL, so CI also does:
 
 Both suites add made-up cases the fixtures don't have, like a fact tagged
 years late, a cover count for one share class and a missing quarter.
-Without them, reverting those fixes would still pass. I reverted each fix
-one at a time and all 16 broke at least one test.
+Without them, reverting those fixes would still pass. I reverted each of
+the data fixes above one at a time (16 of them) and every revert broke at
+least one test.
 
 DuckDB isn't Snowflake, so the SQL gets rewritten where the dialects differ.
 This catches logic and value bugs, not dialect problems.
@@ -246,7 +276,7 @@ triggered by hand, because the warehouse is on trial credits.
 Needs an AWS account, a Snowflake account, Terraform, Docker and Python.
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt dbt-core dbt-snowflake
 cp .env.example .env                                  # fill in
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars   # fill in
 cp dbt/profiles.yml.example ~/.dbt/profiles.yml       # fill in
@@ -279,6 +309,9 @@ then:
 ```bash
 docker compose --env-file .env.airflow up -d
 ```
+
+The price DAG fails if any ticker comes back empty, after writing the ones
+that worked, so a gap shows up in Airflow instead of in the data.
 
 ### Deployment notes
 
