@@ -129,7 +129,15 @@ ttm as (
                 rows between 3 preceding and current row
             ),
             period_end
-        ) as ttm_span_days
+        ) as ttm_span_days,
+
+        -- the join only checks the latest quarter was public. an earlier quarter
+        -- in the window can have a later filed date (standalone Q4s often get
+        -- tagged a year later), so TTM waits for all four
+        max(filed_date) over (
+            partition by ticker order by period_end
+            rows between 3 preceding and current row
+        ) as ttm_filed_date
 
     from fundamentals
 
@@ -179,6 +187,7 @@ final as (
         case
             when t.revenue_quarters_in_ttm = 4
              and t.ttm_span_days between 250 and 290
+             and t.ttm_filed_date <= m.trade_date
              and c.revenue_metric_applicable
             then t.ttm_revenue
         end as ttm_revenue,
@@ -186,6 +195,7 @@ final as (
         case
             when t.income_quarters_in_ttm = 4
              and t.ttm_span_days between 250 and 290
+             and t.ttm_filed_date <= m.trade_date
             then t.ttm_net_income
         end as ttm_net_income,
 
@@ -196,6 +206,7 @@ final as (
         case
             when t.income_quarters_in_ttm = 4
              and t.ttm_span_days between 250 and 290
+             and t.ttm_filed_date <= m.trade_date
              and t.ttm_net_income > 0
              and s.shares_outstanding > 0
             then (m.close_price * s.shares_outstanding) / nullif(t.ttm_net_income, 0)
@@ -211,6 +222,7 @@ final as (
         case
             when t.revenue_quarters_in_ttm = 4
              and t.ttm_span_days between 250 and 290
+             and t.ttm_filed_date <= m.trade_date
              and t.ttm_revenue > 0
              and s.shares_outstanding > 0
              and c.revenue_metric_applicable

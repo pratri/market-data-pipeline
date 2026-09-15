@@ -161,6 +161,9 @@ as_reported_neighbors as (
 -- isn't total revenue for Q4 2015 (derived wins). Around spinoffs the FY is
 -- restated but earlier YTD isn't (GE 2024, JNJ 2023, HON 2025), so reported
 -- wins. With no neighbours, reported wins.
+-- When they're within 20%, the one filed first wins. HON's Q4 2024 was only
+-- tagged standalone in the FY2025 10-K (2026-02), a year after the derived
+-- number was public, so using it put 2026 data into 2025 TTMs.
 flows_paired as (
 
     select
@@ -174,6 +177,11 @@ flows_paired as (
                 d.value is not null
                 and abs(a.value - d.value) > 0.2 * greatest(abs(a.value), abs(d.value))
                 and abs(d.value - n.neighbor_value) < abs(a.value - n.neighbor_value)
+            )
+            or (
+                d.value is not null
+                and abs(a.value - d.value) <= 0.2 * greatest(abs(a.value), abs(d.value))
+                and d.filed < a.filed
             ),
             false
         ) as use_derived,

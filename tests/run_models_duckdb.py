@@ -207,6 +207,12 @@ def value_checks(con) -> None:
                  where ticker = 'AAPL' and trade_date = date '2025-09-02'""")
     expect("AAPL quarter attached on 2025-09-02", str(got[0]), "2025-06-28")
 
+    # HON's standalone Q4 2024 was only tagged in Feb 2026. In mid 2025 the TTM
+    # should use the Q4 derived from the FY 10-K that was public then.
+    got = one("""select ttm_revenue / 1e9 from fct_daily_metrics
+                 where ticker = 'HON' and trade_date = date '2025-06-02'""")
+    expect("HON TTM revenue on 2025-06-02", None if got[0] is None else round(got[0], 3), 39.215, tol=0.001)
+
     # NFLX 10-for-1: price drops 10x, share count rises 10x, market cap doesn't move.
     caps = con.execute("""select market_cap from fct_daily_metrics
         where ticker = 'NFLX' and trade_date in (date '2025-11-14', date '2025-11-17')
