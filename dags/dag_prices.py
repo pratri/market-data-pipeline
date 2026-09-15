@@ -34,7 +34,7 @@ LOOKBACK_DAYS = 10
 )
 def ingest_prices_daily():
 
-    @task
+    @task(execution_timeout=pendulum.duration(minutes=30))
     def ingest() -> dict:
         """Fetch recent prices and write any dates not already in S3.
 

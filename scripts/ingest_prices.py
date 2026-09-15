@@ -197,7 +197,6 @@ def main() -> None:
         print(f"Found {len(existing)} dates already in S3, only missing tickers get added to those.\n")
 
     all_frames = []
-    failed_batches = []
 
     for i in range(0, len(tickers), BATCH_SIZE):
         batch = tickers[i:i + BATCH_SIZE]
@@ -205,7 +204,6 @@ def main() -> None:
 
         raw = download_batch(batch, start, end)
         if raw.empty:
-            failed_batches.append(batch)
             continue
 
         long_df = to_long_format(raw, batch)
@@ -231,9 +229,11 @@ def main() -> None:
         print(f"Skipped {skipped} dates already complete.")
     print(f"Tickers with data: {combined['ticker'].nunique()} / {len(tickers)}")
 
-    if failed_batches:
-        flat = [t for b in failed_batches for t in b]
-        print(f"\nWARNING: {len(flat)} tickers failed entirely: {flat}")
+    # fail after uploading what worked, so Airflow retries and the gap is visible.
+    # checks tickers, not batches: yfinance can drop one ticker from a good batch
+    missing = sorted(set(tickers) - set(combined["ticker"]))
+    if missing:
+        sys.exit(f"\nERROR: {len(missing)} tickers returned no data: {missing}")
 
 
 if __name__ == "__main__":
