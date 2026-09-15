@@ -18,14 +18,17 @@ x-airflow-common: &airflow-common
 
     # has to be the same in every container, otherwise tasks sit in queued
     # with "Signature verification failed"
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env.airflow}
 
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
 
     # encrypts connections and variables in the db
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in .env.airflow}
+
+    # the scheduler healthcheck below needs this, it's off by default
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
 
     # for the ingestion scripts. On EC2 the instance profile provides AWS creds.
     S3_BUCKET: ${S3_BUCKET}

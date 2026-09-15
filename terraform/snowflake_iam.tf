@@ -8,11 +8,11 @@
 variable "snowflake_iam_user_arn" {
   description = <<-EOT
     STORAGE_AWS_IAM_USER_ARN from `DESC INTEGRATION S3_MARKET_INT` in Snowflake.
-    Placeholder on the first apply; fill in and re-apply after creating
-    the integration.
+    Leave empty on the first apply (the role then only trusts this AWS
+    account), fill in and re-apply after creating the integration.
   EOT
   type        = string
-  default     = "arn:aws:iam::742031403615:root"
+  default     = ""
 }
 
 variable "snowflake_external_id" {
@@ -24,14 +24,20 @@ variable "snowflake_external_id" {
   default     = "placeholder_external_id"
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_iam_policy_document" "snowflake_assume_role" {
   statement {
     effect  = "Allow"
     actions = ["sts:AssumeRole"]
 
     principals {
-      type        = "AWS"
-      identifiers = [var.snowflake_iam_user_arn]
+      type = "AWS"
+      identifiers = [
+        var.snowflake_iam_user_arn != ""
+        ? var.snowflake_iam_user_arn
+        : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      ]
     }
 
     # external ID check
@@ -60,7 +66,7 @@ data "aws_iam_policy_document" "snowflake_s3_read" {
       "s3:GetObjectVersion",
     ]
 
-    resources = ["${aws_s3_bucket.raw_data.arn}/*"]
+    resources = ["${aws_s3_bucket.raw_data.arn}/raw/*"]
   }
 
   # COPY INTO needs ListBucket to find files, otherwise it silently loads nothing
@@ -74,6 +80,12 @@ data "aws_iam_policy_document" "snowflake_s3_read" {
     ]
 
     resources = [aws_s3_bucket.raw_data.arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["raw/*"]
+    }
   }
 }
 

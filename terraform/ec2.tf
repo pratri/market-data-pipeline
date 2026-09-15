@@ -102,9 +102,17 @@ resource "aws_instance" "airflow" {
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
   EOF
 
-  # don't recreate the instance when user_data changes
+  # IMDSv2 only. hop limit 2 so containers can still reach instance credentials
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
+  }
+
+  # don't recreate the instance (and lose Airflow's db) when user_data
+  # changes or Canonical publishes a newer AMI
   lifecycle {
-    ignore_changes = [user_data]
+    ignore_changes = [user_data, ami]
   }
 
   tags = {

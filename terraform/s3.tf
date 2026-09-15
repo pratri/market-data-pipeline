@@ -38,6 +38,39 @@ resource "aws_s3_bucket_public_access_block" "raw_data" {
   restrict_public_buckets = true
 }
 
+# refuse plain HTTP requests
+data "aws_iam_policy_document" "raw_data_tls_only" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    resources = [
+      aws_s3_bucket.raw_data.arn,
+      "${aws_s3_bucket.raw_data.arn}/*",
+    ]
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "raw_data" {
+  bucket = aws_s3_bucket.raw_data.id
+  policy = data.aws_iam_policy_document.raw_data_tls_only.json
+
+  # the public access block has to be in place before a bucket policy
+  depends_on = [aws_s3_bucket_public_access_block.raw_data]
+}
+
 # expire old versions after 30 days and clean up failed multipart uploads
 resource "aws_s3_bucket_lifecycle_configuration" "raw_data" {
   bucket = aws_s3_bucket.raw_data.id

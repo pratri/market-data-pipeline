@@ -208,11 +208,14 @@ WHERE trade_date IS NULL;
 --   python scripts/ingest_fundamentals.py
 --
 -- then add the columns, empty both tables (TRUNCATE also clears COPY's load
--- history, so every file loads again) and rerun steps 6 and 7.
+-- history, so every file loads again) and rerun steps 6 and 7 with
+-- LOAD_UNCERTAIN_FILES = TRUE, or files older than 64 days get skipped.
+--
+-- Commented out so running the whole file can't empty the tables.
 
-ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS dividends FLOAT;
-ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS stock_splits FLOAT;
-ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP_NTZ;
+-- ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS dividends FLOAT;
+-- ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS stock_splits FLOAT;
+-- ALTER TABLE MARKET_DATA.RAW.PRICES ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMP_NTZ;
 
-TRUNCATE TABLE MARKET_DATA.RAW.PRICES;
-TRUNCATE TABLE MARKET_DATA.RAW.FUNDAMENTALS;
+-- TRUNCATE TABLE MARKET_DATA.RAW.PRICES;
+-- TRUNCATE TABLE MARKET_DATA.RAW.FUNDAMENTALS;
