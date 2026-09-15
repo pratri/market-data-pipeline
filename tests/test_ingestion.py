@@ -129,6 +129,20 @@ def test_predecessor_ciks_are_configured():
     expect("BLK has a predecessor", ing.PREDECESSOR_CIKS.get("BLK"), ["0001364742"])
 
 
+def test_failed_predecessor_skips_the_ticker():
+    """Half of XOM's history would replace last week's full snapshot."""
+    good = facts(Revenues=[fact(10, "2025-01-01", "2025-03-31", "10-Q", "2025-04-30", "a")])
+    real_fetch, real_delay = ing.fetch_company_facts, ing.REQUEST_DELAY
+    ing.REQUEST_DELAY = 0
+    try:
+        ing.fetch_company_facts = lambda session, cik, ua: None if cik == "0000034088" else good
+        expect("predecessor fails -> nothing", ing.fetch_ticker(None, "XOM", "current", "ua").empty, True)
+        ing.fetch_company_facts = lambda session, cik, ua: good
+        expect("both succeed -> rows", ing.fetch_ticker(None, "XOM", "current", "ua").empty, False)
+    finally:
+        ing.fetch_company_facts, ing.REQUEST_DELAY = real_fetch, real_delay
+
+
 def test_current_cik_wins_a_tie():
     """Both registrants can file the same period on the same day."""
     # predecessor listed first, so only the tie-break can put it second

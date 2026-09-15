@@ -289,8 +289,10 @@ def fetch_ticker(session: requests.Session, ticker: str, cik: str, ua: str) -> p
         facts = fetch_company_facts(session, c, ua)
         time.sleep(REQUEST_DELAY)
         if facts is None:
-            print(f"    no facts returned for CIK {c}")
-            continue
+            # a partial ticker would replace last week's full snapshot in dbt,
+            # so skip it and keep the old one
+            print(f"    no facts returned for CIK {c}, skipping {ticker}")
+            return pd.DataFrame()
         facts_by_cik.append((c, facts))
 
     return process_company(ticker, facts_by_cik)
